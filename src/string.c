@@ -1,6 +1,6 @@
 #include "string.h"
 
-int compare_string(char* s1, char* s2) {
+int compare_string(const char* s1, const char* s2) {
     int i;
     for (i = 0; s1[i] == s2[i]; i++) {
         if (s1[i] == '\0') return 0;
@@ -8,7 +8,7 @@ int compare_string(char* s1, char* s2) {
     return s1[i] - s2[i];
 }
 
-int strcmp(char* s1, char* s2) {
+int strcmp(const char* s1, const char* s2) {
     return compare_string(s1, s2);
 }
 
@@ -122,7 +122,8 @@ int memcmp(const void* s1, const void* s2, unsigned int n) {
 }
 
 int strncmp(const char* a, const char* b, unsigned int n) {
-    while (*a && *a == *b) { a++; b++; }
+    while (n > 0 && *a && *a == *b) { a++; b++; n--; }
+    if (n == 0) return 0;
     return *a - *b;
 }
 

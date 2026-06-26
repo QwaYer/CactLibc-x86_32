@@ -95,6 +95,7 @@ long ftell(FILE *stream) {
 }
 
 int fflush(FILE *stream) {
+    (void)stream;
     return 0;
 }
 
@@ -272,10 +273,9 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
             format++;
             unsigned int flen = 1;
             int is_long = 0;
-            int is_unsigned = 0;
             /* simple flag parsing */
             while (*format == 'l') { is_long = 1; format++; flen++; }
-            if (*format == 'u') { is_unsigned = 1; format++; flen++; }
+            if (*format == 'u') { format++; flen++; }
             if (*format == 'z') { format++; flen++; } /* skip z (size_t) */
             /* re-check for l after u */
             while (*format == 'l') { is_long = 1; format++; flen++; }
