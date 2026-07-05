@@ -141,13 +141,32 @@
 
 intptr_t syscall(int num, uintptr_t p1, uintptr_t p2, uintptr_t p3);
 
+/*
+ * Syscall ABI (SYSENTER/SYSEXIT):
+ *   EAX = syscall number
+ *   EBX = arg1
+ *   ESI = arg2          (ECX is stolen by the CPU as return-ESP)
+ *   EDI = arg3          (EDX is stolen by the CPU as return-EIP)
+ *   ECX = return ESP    (loaded by the stub)
+ *   EDX = return EIP    (loaded by the stub via call/pop)
+ * Return value in EAX. ECX/EDX are clobbered (standard for x86 syscalls).
+ *
+ * The return-EIP is derived position-independently (call 1f / pop / add) so
+ * the same code works in libc.a (static) and libc.so (PIC/PIE).
+ */
 static inline intptr_t __syscall0(int num) {
     intptr_t ret;
     __asm__ volatile (
-        "int $0x80"
+        "movl %%esp, %%ecx\n\t"
+        "call 1f\n\t"
+        "1:\n\t"
+        "popl %%edx\n\t"
+        "addl $(2f - 1b), %%edx\n\t"
+        "sysenter\n\t"
+        "2:\n\t"
         : "=a"(ret)
         : "a"(num)
-        : "memory"
+        : "ecx", "edx", "memory"
     );
     return ret;
 }
@@ -155,10 +174,16 @@ static inline intptr_t __syscall0(int num) {
 static inline intptr_t __syscall1(int num, uintptr_t a1) {
     intptr_t ret;
     __asm__ volatile (
-        "int $0x80"
+        "movl %%esp, %%ecx\n\t"
+        "call 1f\n\t"
+        "1:\n\t"
+        "popl %%edx\n\t"
+        "addl $(2f - 1b), %%edx\n\t"
+        "sysenter\n\t"
+        "2:\n\t"
         : "=a"(ret)
         : "a"(num), "b"(a1)
-        : "memory"
+        : "ecx", "edx", "memory"
     );
     return ret;
 }
@@ -166,10 +191,16 @@ static inline intptr_t __syscall1(int num, uintptr_t a1) {
 static inline intptr_t __syscall2(int num, uintptr_t a1, uintptr_t a2) {
     intptr_t ret;
     __asm__ volatile (
-        "int $0x80"
+        "movl %%esp, %%ecx\n\t"
+        "call 1f\n\t"
+        "1:\n\t"
+        "popl %%edx\n\t"
+        "addl $(2f - 1b), %%edx\n\t"
+        "sysenter\n\t"
+        "2:\n\t"
         : "=a"(ret)
-        : "a"(num), "b"(a1), "c"(a2)
-        : "memory"
+        : "a"(num), "b"(a1), "S"(a2)
+        : "ecx", "edx", "memory"
     );
     return ret;
 }
@@ -177,10 +208,16 @@ static inline intptr_t __syscall2(int num, uintptr_t a1, uintptr_t a2) {
 static inline intptr_t __syscall3(int num, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     intptr_t ret;
     __asm__ volatile (
-        "int $0x80"
+        "movl %%esp, %%ecx\n\t"
+        "call 1f\n\t"
+        "1:\n\t"
+        "popl %%edx\n\t"
+        "addl $(2f - 1b), %%edx\n\t"
+        "sysenter\n\t"
+        "2:\n\t"
         : "=a"(ret)
-        : "a"(num), "b"(a1), "c"(a2), "d"(a3)
-        : "memory"
+        : "a"(num), "b"(a1), "S"(a2), "D"(a3)
+        : "ecx", "edx", "memory"
     );
     return ret;
 }
