@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/license-GPLv3-blue.svg?style=for-the-badge" alt="License: GPLv3">
   <img src="https://img.shields.io/badge/arch-i686-red.svg?style=for-the-badge" alt="Arch: i686">
   <img src="https://img.shields.io/badge/language-C%2FASM-orange.svg?style=for-the-badge" alt="Language: C/ASM">
-  <img src="https://img.shields.io/badge/output-libc.so-green.svg?style=for-the-badge" alt="=libc.so">
+  <img src="https://img.shields.io/badge/output-clibc.so-green.svg?style=for-the-badge" alt="clibc.so">
   <img src="https://img.shields.io/badge/syscall-int%200x80-purple.svg?style=for-the-badge" alt="int 0x80">
   <img src="https://img.shields.io/badge/status-1.0.0-yellow.svg?style=for-the-badge" alt="1.0.0">
 </p>
@@ -25,12 +25,12 @@
 | **Public headers** | 18 files under `include/` (including `sys/mman.h`) |
 | **Syscall IDs** | **95** — `SYS_SYSCALL_COUNT` mirrors the kernel enum |
 | **Runtime deps** | None (only the cross `gcc`/`ar`/`ld` toolchain) |
-| **Artifacts** | **`libc.a`** (static), **`libc.so`** (shared ET_DYN for PIE), **`build/pic/start.o`** (PIC `_start`) |
+| **Artifacts** | **`clibc.so`** (shared ET_DYN for PIE), **`build/pic/start.o`** (PIC `_start`) |
 
 CactLib is the **contract surface** between user ELF binaries and the kernel. If you add or renumber a syscall in the kernel, you **must**:
 
 1. Update **`include/syscall.h`** here to match **`Cact/kernel/core/syscalls/syscalls.h`**.
-2. Rebuild **`libc.a`** / **`libc.so`** (`make`).
+2. Rebuild **`clibc.so`** (`make`).
 3. **Re-link every user program** (init, shell, demos, drivers’ staged ELFs) against the new archive / shared object.
 
 **Ecosystem:** **[CactOS-x86_32](https://github.com/QwaYer/CactOS-x86_32)** (integrator) · **CactKernel** · **CactLib** · **Cactsole** · **Cgoct** · **LocalRepoCactOS** (`cctkfs.img` packer).
@@ -51,7 +51,7 @@ Clone **[CactOS-x86_32](https://github.com/QwaYer/CactOS-x86_32)** next to this 
 git clone https://github.com/QwaYer/CactLib-x86_32
 cd CactLib-x86_32
 
-make              # libc.a + libc.so + PIC objects under build/pic/
+make              # clibc.so + ld.so + PIC objects under build/pic/
 make clean        # remove build/ trees and libraries
 ```
 
@@ -68,7 +68,7 @@ CFLAGS = -m32 -ffreestanding -fno-pie -fno-stack-protector -nostdlib \
 gcc -m32 -nostdlib -ffreestanding -o myprogram myprogram.o libc.a
 ```
 
-**Shared / PIE note:** `libc.so` is built as **`ET_DYN`** with a fixed link script (`libc.ld`). PIE executables link against **`build/pic/start.o`** + relocatable `*.o` from `build/pic/`.
+**Shared / PIE note:** `clibc.so` is built as **`ET_DYN`** with a fixed link script (`libc.ld`). PIE executables link against **`build/pic/start.o`** + relocatable `*.o` from `build/pic/`.
 
 > ⚠️ **i686 only.** Building `-m32` will fail on a pure 64-bit toolchain without multilib.
 

@@ -25,10 +25,10 @@ C_PIC_OBJS = $(patsubst $(SRC_DIR)/%.c, $(PIC_DIR)/%.o, $(C_SRCS))
 START_O_PIC = $(PIC_DIR)/start.o
 
 TARGET_A  = libc.a
-TARGET_SO = libc.so
+TARGET_SO = clibc.so
 LD_SO     = ld.so
 
-all: $(TARGET_A) $(TARGET_SO) $(START_O_PIC) $(LD_SO)
+all: $(TARGET_SO) $(START_O_PIC) $(LD_SO)
 
 $(TARGET_A): $(OBJS)
 	$(AR) rcs $@ $^
@@ -53,7 +53,7 @@ ALL_PIC_OBJS = $(C_PIC_OBJS) $(filter-out $(START_O_PIC),$(patsubst $(SRC_DIR)/%
 
 $(TARGET_SO): $(ALL_PIC_OBJS) libc.ld
 	$(LD) -m elf_i386 -shared -nostdlib \
-	      --hash-style=both -soname=libc.so \
+	      --hash-style=both -soname=clibc.so \
 	      -T libc.ld -o $@ $(ALL_PIC_OBJS)
 
 # Userspace dynamic linker (PT_INTERP interpreter). Self-contained, no libc.
