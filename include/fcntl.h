@@ -9,6 +9,8 @@
 #define O_TRUNC     0x0200
 #define O_APPEND    0x0400
 #define O_NONBLOCK  0x0800
+#define O_CLOEXEC   0x80000
+#define O_EXCL      0x0080
 
 /* fcntl() commands */
 #define F_DUPFD     0   /* duplicate file descriptor (>= arg) */
@@ -21,6 +23,7 @@
 #define FD_CLOEXEC  1   /* close-on-exec */
 
 int open(const char *pathname, int flags, ...);
+int creat(const char *pathname, int mode);
 int fcntl(int fd, int cmd, ...);
 
 #endif

@@ -1,7 +1,11 @@
 #include "dirent.h"
-#include "syscall.h"
+#include "nodeio.h"
+#include "errno.h"
 #include <stdint.h>
 
 int getdents(int fd, struct dirent *buf, unsigned int count) {
-    return (int)syscall(SYS_GETDENTS, (uintptr_t)fd, (uintptr_t)buf, (uintptr_t)count);
+    cact_getdents_arg_t a;
+    a.buf   = buf;
+    a.count = count;
+    return nio_map(nio_ioctl(fd, CACT_FDCTL_GETDENTS, &a));
 }

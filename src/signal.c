@@ -1,19 +1,11 @@
 #include "signal.h"
 #include "syscall.h"
+#include "nodeio.h"
+#include "errno.h"
 #include <stdint.h>
 
-int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
-    (void)oldact;
-    if (!act || signum <= 0 || signum >= KERNEL_NSIG) return -1;
-    return (int)syscall(SYS_SIGACTION, (uintptr_t)(unsigned)signum,
-                        (uintptr_t)act->sa_handler, 0);
-}
+/* Индексы/маски сигналов — в представлении ядра (бит = индекс). */
 
-int sigreturn(void) {
-    return (int)syscall(SYS_SIGRETURN, 0, 0, 0);
-}
-
-/* POSIX номера или «сырой» индекс 1..12; либо маска ровно с одним битом (как SIGINT). */
 static int sig_number_to_sigindex(int signum) {
     unsigned u = (unsigned)signum;
     if (u > 0 && (u & (u - 1u)) == 0u) {
@@ -24,7 +16,7 @@ static int sig_number_to_sigindex(int signum) {
             bit++;
         }
         if (bit >= 1 && bit < KERNEL_NSIG) return bit;
-        return -1;
+        return -1;   /* SIGKILL (bit 0) обрабатывается как принудительный kill */
     }
     switch (signum) {
     case 1:  return 10;
@@ -42,25 +34,85 @@ static int sig_number_to_sigindex(int signum) {
     }
 }
 
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
+    (void)oldact;
+    if (!act) { errno = EINVAL; return -1; }
+    int idx = sig_number_to_sigindex(signum);
+    if (idx < 0) { errno = EINVAL; return -1; }
+    cact_sigaction_arg_t a;
+    a.signum  = (uint32_t)idx;
+    a.handler = (uint32_t)(uintptr_t)act->sa_handler;
+    int r = nio_ctl(CACT_PROCCTL_SIGACTION, &a);
+    if (r < 0) { errno = -r; return -1; }
+    return 0;
+}
+
+int sigreturn(void) {
+    return (int)syscall(SYS_SIGRETURN, 0, 0, 0);
+}
+
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    return (int)syscall(SYS_SIGPROCMASK, (uintptr_t)how, (uintptr_t)set, (uintptr_t)oldset);
+    cact_sigprocmask_arg_t a;
+    a.how    = (uint32_t)how;
+    a.set    = set ? *set : 0;
+    a.oldset = 0;
+    int r = nio_ctl(CACT_PROCCTL_SIGPROCMASK, &a);
+    if (r < 0) { errno = -r; return -1; }
+    if (oldset) *oldset = a.oldset;
+    return 0;
 }
 
 int sigpending(sigset_t *set) {
-    return (int)syscall(SYS_SIGPENDING, (uintptr_t)set, 0, 0);
+    if (!set) { errno = EINVAL; return -1; }
+    uint32_t v = 0;
+    int r = nio_ctl(CACT_PROCCTL_SIGPENDING, &v);
+    if (r < 0) { errno = -r; return -1; }
+    *set = v;
+    return 0;
 }
 
 int sigsuspend(const sigset_t *mask) {
-    return (int)syscall(SYS_SIGSUSPEND, (uintptr_t)mask, 0, 0);
+    uint32_t m = mask ? *mask : 0;
+    int r = nio_ctl(CACT_PROCCTL_SIGSUSPEND, &m);
+    if (r < 0) { errno = -r; return -1; }
+    errno = EINTR;
+    return -1;
 }
 
 unsigned int alarm(unsigned int seconds) {
-    return (unsigned int)syscall(SYS_ALARM, (uintptr_t)seconds, 0, 0);
+    uint32_t s = seconds;
+    int r = nio_ctl(CACT_PROCCTL_ALARM, &s);
+    if (r < 0) { errno = -r; return 0; }
+    return (unsigned int)r;
 }
 
 int setitimer(int which, const struct itimerval *new_value,
               struct itimerval *old_value) {
-    return (int)syscall(SYS_SETITIMER, (uintptr_t)which, (uintptr_t)new_value, (uintptr_t)old_value);
+    if (which != 0) { errno = EINVAL; return -1; }   /* ITIMER_REAL only */
+
+    cact_itimerval_arg_t a;
+    a.it_value_ms   = 0;
+    a.it_interval_ms = 0;
+    if (new_value) {
+        if (new_value->it_value.tv_sec < 0 || new_value->it_value.tv_usec < 0 ||
+            new_value->it_interval.tv_sec < 0 || new_value->it_interval.tv_usec < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        a.it_value_ms = (uint32_t)(new_value->it_value.tv_sec * 1000) +
+                        (uint32_t)(new_value->it_value.tv_usec / 1000);
+        a.it_interval_ms = (uint32_t)(new_value->it_interval.tv_sec * 1000) +
+                           (uint32_t)(new_value->it_interval.tv_usec / 1000);
+    }
+    int r = nio_ctl(CACT_PROCCTL_SETITIMER, &a);
+    if (r < 0) { errno = -r; return -1; }
+    if (old_value) {
+        old_value->it_value.tv_sec  = (long)(a.old_value_ms / 1000);
+        old_value->it_value.tv_usec = (long)((a.old_value_ms % 1000) * 1000);
+        old_value->it_interval.tv_sec  = (long)(a.old_interval_ms / 1000);
+        old_value->it_interval.tv_usec = (long)((a.old_interval_ms % 1000) * 1000);
+    }
+    return 0;
 }
 
 sighandler_t signal(int signum, sighandler_t handler) {
@@ -73,5 +125,12 @@ sighandler_t signal(int signum, sighandler_t handler) {
 }
 
 int kill(pid_t pid, int sig) {
-    return (int)syscall(SYS_KILL, (uintptr_t)pid, (uintptr_t)sig, 0);
+    int idx = sig_number_to_sigindex(sig);
+    if (idx < 0) idx = 0;   /* SIGKILL / немаршрутизируемый → task_kill */
+    cact_signal_arg_t a;
+    a.pid    = (uint32_t)pid;
+    a.signum = (uint32_t)idx;
+    int r = nio_ctl(CACT_PROCCTL_SIGNAL, &a);
+    if (r < 0) { errno = -r; return -1; }
+    return 0;
 }

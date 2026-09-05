@@ -1,15 +1,28 @@
 #include "stdio.h"
-#include "syscall.h"
 #include "string.h"
 #include "stdlib.h"
 #include "unistd.h"
 #include "fcntl.h"
+#include "nodeio.h"
+#include "errno.h"
 #include <stdarg.h>
 #include <stdint.h>
 
+#define F_EOF 1
+#define F_ERR 2
+
 
 void kprint(const char *s) {
-    syscall(SYS_PRINT, (uintptr_t)s, 0, 0);
+    int fd = nio_open("/dev/console", O_WRONLY);
+    if (fd < 0) return;
+    size_t n = strlen(s);
+    while (n > 0) {
+        ssize_t w = nio_write(fd, s, n);
+        if (w <= 0) break;
+        s += w;
+        n -= (size_t)w;
+    }
+    nio_close(fd);
 }
 
 int putchar(int c) {
@@ -27,7 +40,27 @@ int puts(const char *str) {
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    return (int)syscall(SYS_RENAME, (uintptr_t)oldpath, (uintptr_t)newpath, 0);
+    /* DIRCTL rename работает внутри одного открытого каталога */
+    char obase[128];
+    int  fd = nio_open_parent(oldpath, obase, sizeof(obase));
+    if (fd < 0) return -1;
+
+    const char *slash = 0;
+    for (const char *s = newpath; *s; s++)
+        if (*s == '/') slash = s;
+    const char *b = slash ? slash + 1 : newpath;
+    char nbase[128];
+    size_t n = 0;
+    while (b[n] && n + 1 < sizeof(nbase)) { nbase[n] = b[n]; n++; }
+    nbase[n] = '\0';
+    if (!nbase[0]) { nio_close(fd); errno = EINVAL; return -1; }
+
+    cact_rename_arg_t a;
+    a.oldname = obase;
+    a.newname = nbase;
+    int r = nio_ioctl(fd, CACT_DIRCTL_RENAME, &a);
+    nio_close(fd);
+    return nio_map(r);
 }
 
 
@@ -75,14 +108,19 @@ int fclose(FILE *stream) {
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t total = size * nmemb;
+    if (total == 0) return 0;
     ssize_t r = read(stream->fd, ptr, total);
-    return (r > 0) ? (r / size) : 0;
+    if (r < 0) { stream->flags |= F_ERR; return 0; }
+    if (r == 0) { stream->flags |= F_EOF; return 0; }
+    return (r / size);
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t total = size * nmemb;
+    if (total == 0) return 0;
     ssize_t w = write(stream->fd, ptr, total);
-    return (w > 0) ? (w / size) : 0;
+    if (w < 0) { stream->flags |= F_ERR; return 0; }
+    return (w / size);
 }
 
 int fseek(FILE *stream, long offset, int whence) {
@@ -112,6 +150,18 @@ char *fgets(char *s, int size, FILE *stream) {
     return s;
 }
 
+int feof(FILE *stream) {
+    return (stream->flags & F_EOF) != 0;
+}
+
+int ferror(FILE *stream) {
+    return (stream->flags & F_ERR) != 0;
+}
+
+void clearerr(FILE *stream) {
+    stream->flags &= ~(F_EOF | F_ERR);
+}
+
 int fgetc(FILE *stream) {
     if (stream->ungotten >= 0) {
         int c = stream->ungotten;
@@ -120,7 +170,8 @@ int fgetc(FILE *stream) {
     }
     unsigned char c;
     ssize_t r = read(stream->fd, &c, 1);
-    if (r <= 0) return EOF;
+    if (r == 0) { stream->flags |= F_EOF; return EOF; }
+    if (r < 0)  { stream->flags |= F_ERR; return EOF; }
     return c;
 }
 
@@ -132,87 +183,234 @@ int ungetc(int c, FILE *stream) {
 int fputc(int c, FILE *stream) {
     unsigned char uc = (unsigned char)c;
     ssize_t w = write(stream->fd, &uc, 1);
-    return (w == 1) ? c : EOF;
+    if (w != 1) { stream->flags |= F_ERR; return EOF; }
+    return c;
 }
 
 int fputs(const char *s, FILE *stream) {
     size_t len = strlen(s);
     ssize_t w = write(stream->fd, s, len);
-    return (w >= 0) ? 0 : EOF;
+    if (w < 0) { stream->flags |= F_ERR; return EOF; }
+    return 0;
 }
 
 int remove(const char *pathname) {
     return unlink(pathname);
 }
 
+int fileno(FILE *stream) {
+    return stream->fd;
+}
+
+ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+    if (!lineptr || !n) return -1;
+    if (!*lineptr) {
+        *n = 128;
+        *lineptr = malloc(*n);
+        if (!*lineptr) return -1;
+    }
+    size_t len = 0;
+    for (;;) {
+        int c = fgetc(stream);
+        if (c == EOF) {
+            if (len == 0) return -1;
+            break;
+        }
+        if (len + 1 >= *n) {
+            size_t nn = *n * 2;
+            char *np = realloc(*lineptr, nn);
+            if (!np) return -1;
+            *lineptr = np;
+            *n = nn;
+        }
+        (*lineptr)[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    (*lineptr)[len] = '\0';
+    return (ssize_t)len;
+}
+
+FILE *tmpfile(void) {
+    char t[] = "/tmp/tmpXXXXXX";
+    int fd = mkstemp(t);
+    if (fd < 0) return 0;
+    FILE *f = fdopen(fd, "w+");
+    if (!f) close(fd);
+    return f;
+}
+
 void perror(const char *s) {
-    write(2, s, strlen(s));
-    write(2, ": error\n", 7);
+    if (s && *s) {
+        write(2, s, strlen(s));
+        write(2, ": ", 2);
+    }
+    char *e = strerror(errno);
+    write(2, e, strlen(e));
+    write(2, "\n", 1);
 }
 
 
-static void _print_str(FILE *f, const char *s) {
-    fputs(s, f);
+static int _fmt_uint(unsigned long v, unsigned int base, int upper, char *out) {
+    static const char lo[] = "0123456789abcdef";
+    static const char up[] = "0123456789ABCDEF";
+    char tmp[40];
+    int n = 0;
+    if (v == 0) tmp[n++] = '0';
+    while (v) { tmp[n++] = (upper ? up : lo)[v % base]; v /= base; }
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    out[n] = '\0';
+    return n;
 }
 
-static void _print_dec(FILE *f, int val) {
-    char buf[32];
-    int i = 0, neg = 0;
-    if (val < 0) { neg = 1; val = -val; }
-    if (val == 0) { buf[i++] = '0'; }
-    else { while (val > 0) { buf[i++] = '0' + val % 10; val /= 10; } }
-    if (neg) buf[i++] = '-';
-    while (i > 0) fputc(buf[--i], f);
-}
+static int _fmt_u64(unsigned long long v, unsigned int base, int upper, char *out) {
+    unsigned int hi = (unsigned int)(v >> 32);
+    unsigned int lo = (unsigned int)(v & 0xffffffffu);
+    static const char lo_d[] = "0123456789abcdef";
+    static const char up_d[] = "0123456789ABCDEF";
+    const char *dig = upper ? up_d : lo_d;
 
-static void _print_hex(FILE *f, unsigned int val) {
-    char buf[32];
-    int i = 0;
-    if (val == 0) { buf[i++] = '0'; }
-    else { while (val > 0) { buf[i++] = "0123456789abcdef"[val % 16]; val /= 16; } }
-    while (i > 0) fputc(buf[--i], f);
+    if (base == 16) {
+        char rev[24];
+        int n = 0;
+        if (lo == 0) rev[n++] = '0';
+        while (lo) { rev[n++] = dig[lo % 16]; lo /= 16; }
+        if (hi) {
+            while (n < 8) rev[n++] = '0';
+            while (hi) { rev[n++] = dig[hi % 16]; hi /= 16; }
+        }
+        for (int i = 0; i < n; i++) out[i] = rev[n - 1 - i];
+        out[n] = '\0';
+        return n;
+    }
+
+    /* base 10: 64/32-битное деление на unsigned int — одна divl, без libgcc */
+    char rev[40];
+    int n = 0;
+    unsigned int d = 10u;
+    if (v == 0) rev[n++] = '0';
+    while (v) {
+        rev[n++] = '0' + (unsigned int)(v % d);
+        v /= d;
+    }
+    for (int i = 0; i < n; i++) out[i] = rev[n - 1 - i];
+    out[n] = '\0';
+    return n;
 }
 
 int vfprintf(FILE *stream, const char *format, va_list args) {
-    for (int i = 0; format[i] != '\0'; i++) {
-        if (format[i] == '%') {
-            i++;
-            if (format[i] == 'd') {
-                int val = va_arg(args, int);
-                _print_dec(stream, val);
-            } else if (format[i] == 'u') {
-                unsigned int val = va_arg(args, unsigned int);
-                _print_dec(stream, (int)val);
-            } else if (format[i] == 's') {
-                char *val = va_arg(args, char *);
-                _print_str(stream, val ? val : "(null)");
-            } else if (format[i] == 'x' || format[i] == 'X') {
-                unsigned int val = va_arg(args, unsigned int);
-                _print_hex(stream, val);
-            } else if (format[i] == 'c') {
-                int val = va_arg(args, int);
-                fputc(val, stream);
-            } else if (format[i] == 'l') {
-                i++;
-                if (format[i] == 'd') {
-                    long val = va_arg(args, long);
-                    _print_dec(stream, (int)val);
-                } else if (format[i] == 'u') {
-                    unsigned long val = va_arg(args, unsigned long);
-                    _print_dec(stream, (int)val);
-                } else if (format[i] == 'x' || format[i] == 'X') {
-                    unsigned long val = va_arg(args, unsigned long);
-                    _print_hex(stream, (unsigned int)val);
-                }
-            } else if (format[i] == 'p') {
-                void *val = va_arg(args, void *);
-                fputc('0', stream); fputc('x', stream);
-                _print_hex(stream, (unsigned int)(uintptr_t)val);
-            } else if (format[i] == '%') {
-                fputc('%', stream);
+    for (; *format; format++) {
+        if (*format != '%') { fputc(*format, stream); continue; }
+
+        format++;
+        int zero = 0, minus = 0, width = 0, islong = 0, isll = 0;
+        if (*format == '0') { zero = 1; format++; }
+        if (*format == '-') { minus = 1; format++; }
+        while (*format >= '0' && *format <= '9') {
+            width = width * 10 + (*format - '0');
+            format++;
+        }
+        {
+            int nl = 0;
+            while (*format == 'l') { nl++; format++; }
+            islong = (nl == 1);
+            isll   = (nl >= 2);
+        }
+
+        char tmp[64];
+        int len = 0, neg = 0, sign_len = 0;
+        char *sval = 0;
+        int cval = 0;
+
+        switch (*format) {
+        case 'd': {
+            if (isll) {
+                long long v = va_arg(args, long long);
+                unsigned long long u;
+                if (v < 0) { neg = 1; u = (unsigned long long)(-(v + 1)) + 1ULL; }
+                else       { u = (unsigned long long)v; }
+                len = _fmt_u64(u, 10, 0, tmp);
+            } else {
+                long v = islong ? va_arg(args, long) : (long)va_arg(args, int);
+                if (v < 0) { neg = 1; v = -v; }
+                len = _fmt_uint((unsigned long)v, 10, 0, tmp);
             }
+            break;
+        }
+        case 'u': {
+            if (isll) {
+                unsigned long long v = va_arg(args, unsigned long long);
+                len = _fmt_u64(v, 10, 0, tmp);
+            } else {
+                unsigned long v = islong ? va_arg(args, unsigned long)
+                                         : (unsigned long)va_arg(args, unsigned int);
+                len = _fmt_uint(v, 10, 0, tmp);
+            }
+            break;
+        }
+        case 'o': {
+            unsigned long v = islong ? va_arg(args, unsigned long)
+                                     : (unsigned long)va_arg(args, unsigned int);
+            len = _fmt_uint(v, 8, 0, tmp);
+            break;
+        }
+        case 'x': case 'X': {
+            if (isll) {
+                unsigned long long v = va_arg(args, unsigned long long);
+                len = _fmt_u64(v, 16, *format == 'X', tmp);
+            } else {
+                unsigned long v = islong ? va_arg(args, unsigned long)
+                                         : (unsigned long)va_arg(args, unsigned int);
+                len = _fmt_uint(v, 16, *format == 'X', tmp);
+            }
+            break;
+        }
+        case 'p': {
+            void *v = va_arg(args, void *);
+            tmp[0] = '0'; tmp[1] = 'x';
+            len = _fmt_uint((unsigned long)(uintptr_t)v, 16, 0, tmp + 2) + 2;
+            break;
+        }
+        case 'c':
+            cval = va_arg(args, int);
+            len = 1;
+            break;
+        case 's':
+            sval = va_arg(args, char *);
+            if (!sval) sval = "(null)";
+            len = strlen(sval);
+            break;
+        case '%':
+            fputc('%', stream);
+            continue;
+        default:
+            fputc('%', stream);
+            fputc(*format, stream);
+            continue;
+        }
+
+        if (neg) sign_len = 1;
+        int pad = width - (len + sign_len);
+        if (pad < 0) pad = 0;
+
+        if (minus) {
+            if (neg) fputc('-', stream);
+        } else if (zero) {
+            if (neg) fputc('-', stream);
+            for (int i = 0; i < pad; i++) fputc('0', stream);
         } else {
-            fputc(format[i], stream);
+            for (int i = 0; i < pad; i++) fputc(' ', stream);
+            if (neg) fputc('-', stream);
+        }
+
+        if (*format == 'c') {
+            fputc(cval, stream);
+        } else if (*format == 's') {
+            for (int i = 0; i < len; i++) fputc(sval[i], stream);
+        } else {
+            for (int i = 0; i < len; i++) fputc(tmp[i], stream);
+        }
+        if (minus) {
+            for (int i = 0; i < pad; i++) fputc(' ', stream);
         }
     }
     return 0;
@@ -241,89 +439,124 @@ static void _buf_putc(char **pp, size_t *pos, size_t size, int c) {
     (*pos)++;
 }
 
-static void _buf_puts(char **pp, size_t *pos, size_t size, const char *s) {
-    while (*s)
-        _buf_putc(pp, pos, size, *s++);
-}
-
-static void _buf_putdec(char **pp, size_t *pos, size_t size, int val) {
-    char buf[32];
-    int i = 0, neg = 0;
-    unsigned int v;
-    if (val < 0) { neg = 1; v = (unsigned int)-val; }
-    else         { v = (unsigned int)val; }
-    if (v == 0) { buf[i++] = '0'; }
-    else { while (v > 0) { buf[i++] = '0' + v % 10; v /= 10; } }
-    if (neg) buf[i++] = '-';
-    while (i > 0) _buf_putc(pp, pos, size, buf[--i]);
-}
-
-static void _buf_puthex(char **pp, size_t *pos, size_t size, unsigned int val, int upper) {
-    char buf[32];
-    int i = 0;
-    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
-    if (val == 0) { buf[i++] = '0'; }
-    else { while (val > 0) { buf[i++] = digits[val % 16]; val /= 16; } }
-    while (i > 0) _buf_putc(pp, pos, size, buf[--i]);
+static void _buf_putn(char **pp, size_t *pos, size_t size, const char *s, int len) {
+    for (int i = 0; i < len; i++) _buf_putc(pp, pos, size, s[i]);
 }
 
 static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, va_list args) {
     for (; *format; format++) {
-        if (*format == '%') {
-            format++;
-            unsigned int flen = 1;
-            int is_long = 0;
-            /* simple flag parsing */
-            while (*format == 'l') { is_long = 1; format++; flen++; }
-            if (*format == 'u') { format++; flen++; }
-            if (*format == 'z') { format++; flen++; } /* skip z (size_t) */
-            /* re-check for l after u */
-            while (*format == 'l') { is_long = 1; format++; flen++; }
+        if (*format != '%') { _buf_putc(pp, pos, size, *format); continue; }
 
-            switch (*format) {
-            case 'd': {
-                if (is_long) _buf_putdec(pp, pos, size, (int)va_arg(args, long));
-                else         _buf_putdec(pp, pos, size, va_arg(args, int));
-                break;
+        format++;
+        int zero = 0, minus = 0, width = 0, islong = 0, isll = 0;
+        if (*format == '0') { zero = 1; format++; }
+        if (*format == '-') { minus = 1; format++; }
+        while (*format >= '0' && *format <= '9') {
+            width = width * 10 + (*format - '0');
+            format++;
+        }
+        {
+            int nl = 0;
+            while (*format == 'l') { nl++; format++; }
+            islong = (nl == 1);
+            isll   = (nl >= 2);
+        }
+
+        char tmp[64];
+        int len = 0, neg = 0, sign_len = 0;
+        const char *sval = 0;
+        int cval = 0;
+
+        switch (*format) {
+        case 'd': {
+            if (isll) {
+                long long v = va_arg(args, long long);
+                unsigned long long u;
+                if (v < 0) { neg = 1; u = (unsigned long long)(-(v + 1)) + 1ULL; }
+                else       { u = (unsigned long long)v; }
+                len = _fmt_u64(u, 10, 0, tmp);
+            } else {
+                long v = islong ? va_arg(args, long) : (long)va_arg(args, int);
+                if (v < 0) { neg = 1; v = -v; }
+                len = _fmt_uint((unsigned long)v, 10, 0, tmp);
             }
-            case 'u': {
-                if (is_long) _buf_putdec(pp, pos, size, (int)va_arg(args, unsigned long));
-                else         _buf_putdec(pp, pos, size, (int)va_arg(args, unsigned int));
-                break;
+            break;
+        }
+        case 'u': {
+            if (isll) {
+                unsigned long long v = va_arg(args, unsigned long long);
+                len = _fmt_u64(v, 10, 0, tmp);
+            } else {
+                unsigned long v = islong ? va_arg(args, unsigned long)
+                                         : (unsigned long)va_arg(args, unsigned int);
+                len = _fmt_uint(v, 10, 0, tmp);
             }
-            case 's': {
-                char *s = va_arg(args, char *);
-                _buf_puts(pp, pos, size, s ? s : "(null)");
-                break;
+            break;
+        }
+        case 'o': {
+            unsigned long v = islong ? va_arg(args, unsigned long)
+                                     : (unsigned long)va_arg(args, unsigned int);
+            len = _fmt_uint(v, 8, 0, tmp);
+            break;
+        }
+        case 'x': case 'X': {
+            if (isll) {
+                unsigned long long v = va_arg(args, unsigned long long);
+                len = _fmt_u64(v, 16, *format == 'X', tmp);
+            } else {
+                unsigned long v = islong ? va_arg(args, unsigned long)
+                                         : (unsigned long)va_arg(args, unsigned int);
+                len = _fmt_uint(v, 16, *format == 'X', tmp);
             }
-            case 'x': case 'X': {
-                unsigned int v;
-                if (is_long) v = (unsigned int)va_arg(args, unsigned long);
-                else         v = va_arg(args, unsigned int);
-                _buf_puthex(pp, pos, size, v, *format == 'X');
-                break;
-            }
-            case 'p': {
-                void *val = va_arg(args, void *);
-                _buf_puts(pp, pos, size, "0x");
-                _buf_puthex(pp, pos, size, (unsigned int)(uintptr_t)val, 0);
-                break;
-            }
-            case 'c': {
-                int c = va_arg(args, int);
-                _buf_putc(pp, pos, size, c);
-                break;
-            }
-            case '%':
-                _buf_putc(pp, pos, size, '%');
-                break;
-            default:
-                _buf_putc(pp, pos, size, '%');
-                if (flen > 1) format -= (flen - 1);
-                break;
-            }
-        } else {
+            break;
+        }
+        case 'p': {
+            void *v = va_arg(args, void *);
+            tmp[0] = '0'; tmp[1] = 'x';
+            len = _fmt_uint((unsigned long)(uintptr_t)v, 16, 0, tmp + 2) + 2;
+            break;
+        }
+        case 'c':
+            cval = va_arg(args, int);
+            len = 1;
+            break;
+        case 's':
+            sval = va_arg(args, const char *);
+            if (!sval) sval = "(null)";
+            len = strlen(sval);
+            break;
+        case '%':
+            _buf_putc(pp, pos, size, '%');
+            continue;
+        default:
+            _buf_putc(pp, pos, size, '%');
             _buf_putc(pp, pos, size, *format);
+            continue;
+        }
+
+        if (neg) sign_len = 1;
+        int pad = width - (len + sign_len);
+        if (pad < 0) pad = 0;
+
+        if (minus) {
+            if (neg) _buf_putc(pp, pos, size, '-');
+        } else if (zero) {
+            if (neg) _buf_putc(pp, pos, size, '-');
+            while (pad-- > 0) _buf_putc(pp, pos, size, '0');
+        } else {
+            while (pad-- > 0) _buf_putc(pp, pos, size, ' ');
+            if (neg) _buf_putc(pp, pos, size, '-');
+        }
+
+        if (*format == 'c') {
+            _buf_putc(pp, pos, size, cval);
+        } else if (*format == 's') {
+            _buf_putn(pp, pos, size, sval, len);
+        } else {
+            _buf_putn(pp, pos, size, tmp, len);
+        }
+        if (minus) {
+            while (pad-- > 0) _buf_putc(pp, pos, size, ' ');
         }
     }
 }
@@ -358,11 +591,71 @@ int sprintf(char *str, const char *format, ...) {
     return ret;
 }
 
-char *strerror(int errnum) {
-    (void)errnum;
-    return "Unknown error";
-}
-
 float strtof(const char *str, char **endptr) {
     return (float)strtod(str, endptr);
+}
+
+#define POPEN_MAX 8
+static FILE *_pop_f[POPEN_MAX];
+static pid_t _pop_pid[POPEN_MAX];
+
+FILE *popen(const char *command, const char *type) {
+    if (!command || !type || (type[0] != 'r' && type[0] != 'w') || type[1] == '+')
+        return 0;
+    if (access("/bin/cactsole", X_OK) != 0) {
+        errno = ENOENT;
+        return 0;
+    }
+    int fds[2];
+    if (pipe(fds) != 0) return 0;
+    int wr = (type[0] == 'w');
+
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return 0; }
+    if (pid == 0) {
+        if (wr) dup2(fds[0], 0);
+        else    dup2(fds[1], 1);
+        close(fds[0]);
+        close(fds[1]);
+        char *argv[] = { "cactsole", "-c", (char *)command, 0 };
+        execve("/bin/cactsole", argv, environ);
+        _exit(127);
+    }
+
+    int keep = wr ? fds[1] : fds[0];
+    close(wr ? fds[0] : fds[1]);
+
+    FILE *f = fdopen(keep, wr ? "w" : "r");
+    if (!f) {
+        close(keep);
+        waitpid(pid, 0, 0);
+        return 0;
+    }
+    for (int i = 0; i < POPEN_MAX; i++) {
+        if (_pop_pid[i] == 0) {
+            _pop_f[i] = f;
+            _pop_pid[i] = pid;
+            break;
+        }
+    }
+    return f;
+}
+
+int pclose(FILE *stream) {
+    pid_t pid = 0;
+    for (int i = 0; i < POPEN_MAX; i++) {
+        if (_pop_f[i] == stream) {
+            pid = _pop_pid[i];
+            _pop_f[i] = 0;
+            _pop_pid[i] = 0;
+            break;
+        }
+    }
+    int st = fclose(stream);
+    if (pid) {
+        int s = 0;
+        waitpid(pid, &s, 0);
+        return s;
+    }
+    return st;
 }

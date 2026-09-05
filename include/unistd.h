@@ -48,13 +48,19 @@ pid_t   setsid(void);
 int     setpgid(pid_t pid, pid_t pgid);
 pid_t   getpgid(pid_t pid);
 pid_t   getpgrp(void);
+pid_t   getsid(pid_t pid);
 
 /* ── файловые дескрипторы ── */
 off_t   lseek(int fd, off_t offset, int whence);
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
+int     fdatasync(int fd);
 int     ioctl(int fd, unsigned long cmd, void *arg);
 int     dup(int oldfd);
 int     dup2(int oldfd, int newfd);
+int     dup3(int oldfd, int newfd, int flags);
 int     pipe(int pipefd[2]);
+int     pipe2(int pipefd[2], int flags);
 
 /* ── память ── */
 void   *sbrk(int increment);
@@ -114,5 +120,12 @@ int     setuid(uid_t uid);
 int     setgid(gid_t gid);
 
 int     execvp(const char *file, char *const argv[]);
+
+/* ── getopt (POSIX) ── */
+extern char *optarg;
+extern int optind;
+extern int opterr;
+extern int optopt;
+int getopt(int argc, char *const argv[], const char *optstring);
 
 #endif

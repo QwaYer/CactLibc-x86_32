@@ -1,4 +1,5 @@
 #include "string.h"
+#include "stdlib.h"
 
 int compare_string(const char* s1, const char* s2) {
     int i;
@@ -217,4 +218,152 @@ void* memmove(void* dest, const void* src, unsigned int len) {
         for (unsigned int i = len; i > 0; i--) d[i-1] = s[i-1];
     }
     return dest;
+}
+static int _lower(int c) {
+    if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
+    return c;
+}
+
+int strcasecmp(const char* s1, const char* s2) {
+    while (*s1 && _lower(*s1) == _lower(*s2)) { s1++; s2++; }
+    return _lower((unsigned char)*s1) - _lower((unsigned char)*s2);
+}
+
+int strncasecmp(const char* s1, const char* s2, size_t n) {
+    if (n == 0) return 0;
+    while (n-- > 0) {
+        int a = _lower((unsigned char)*s1);
+        int b = _lower((unsigned char)*s2);
+        if (a != b) return a - b;
+        if (!*s1) return 0;
+        s1++; s2++;
+    }
+    return 0;
+}
+
+char* strdup(const char* s) {
+    if (!s) return 0;
+    size_t n = strlen(s);
+    char* p = malloc(n + 1);
+    if (!p) return 0;
+    memcpy(p, s, n + 1);
+    return p;
+}
+
+char* strndup(const char* s, size_t n) {
+    if (!s) return 0;
+    size_t m = 0;
+    while (m < n && s[m]) m++;
+    char* p = malloc(m + 1);
+    if (!p) return 0;
+    memcpy(p, s, m);
+    p[m] = '\0';
+    return p;
+}
+
+char* strncat(char* dest, const char* src, size_t n) {
+    char* d = dest;
+    while (*d) d++;
+    while (n > 0 && *src) { *d++ = *src++; n--; }
+    *d = '\0';
+    return dest;
+}
+
+char* stpcpy(char* dest, const char* src) {
+    while (*src) *dest++ = *src++;
+    *dest = '\0';
+    return dest;
+}
+
+void* memchr(const void* s, int c, size_t n) {
+    const unsigned char* p = (const unsigned char*)s;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] == (unsigned char)c) return (void*)(p + i);
+    return 0;
+}
+
+void* memmem(const void* haystack, size_t haystacklen,
+             const void* needle, size_t needlelen) {
+    if (!needlelen) return (void*)haystack;
+    if (needlelen > haystacklen) return 0;
+    const unsigned char* h = (const unsigned char*)haystack;
+    const unsigned char* n = (const unsigned char*)needle;
+    for (size_t i = 0; i + needlelen <= haystacklen; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, needlelen) == 0)
+            return (void*)(h + i);
+    }
+    return 0;
+}
+
+char* strchrnul(const char* s, int c) {
+    while (*s && *s != c) s++;
+    return (char*)s;
+}
+
+char* strcasestr(const char* haystack, const char* needle) {
+    if (!*needle) return (char*)haystack;
+    for (; *haystack; haystack++) {
+        if (_lower((unsigned char)*haystack) != _lower((unsigned char)needle[0]))
+            continue;
+        const char* h = haystack;
+        const char* n = needle;
+        while (*n && _lower((unsigned char)*h) == _lower((unsigned char)*n)) {
+            h++; n++;
+        }
+        if (!*n) return (char*)haystack;
+    }
+    return 0;
+}
+
+char* strtok_r(char* str, const char* delim, char** saveptr) {
+    char* s = str ? str : *saveptr;
+    if (!s) return 0;
+    while (*s && strchr(delim, *s)) s++;
+    if (!*s) { *saveptr = 0; return 0; }
+    char* tok = s;
+    while (*s && !strchr(delim, *s)) s++;
+    if (*s) { *s = '\0'; *saveptr = s + 1; }
+    else    { *saveptr = 0; }
+    return tok;
+}
+
+char* strtok(char* str, const char* delim) {
+    static char* save = 0;
+    return strtok_r(str, delim, &save);
+}
+
+char* strsep(char** stringp, const char* delim) {
+    char* s = *stringp;
+    if (!s) return 0;
+    char* tok = s;
+    char* p = s;
+    while (*p) {
+        if (strchr(delim, *p)) {
+            *p = '\0';
+            *stringp = p + 1;
+            return tok;
+        }
+        p++;
+    }
+    *stringp = 0;
+    return tok;
+}
+
+size_t strnlen(const char* s, size_t maxlen) {
+    size_t n = 0;
+    while (n < maxlen && s[n]) n++;
+    return n;
+}
+
+int strcoll(const char* s1, const char* s2) {
+    return strcmp(s1, s2);
+}
+
+size_t strxfrm(char* dest, const char* src, size_t n) {
+    size_t len = strlen(src);
+    if (n == 0) return len;
+    size_t c = len < n - 1 ? len : n - 1;
+    memcpy(dest, src, c);
+    dest[c] = '\0';
+    return len;
 }

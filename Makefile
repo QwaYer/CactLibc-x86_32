@@ -26,8 +26,9 @@ START_O_PIC = $(PIC_DIR)/start.o
 
 TARGET_A  = libc.a
 TARGET_SO = libc.so
+LD_SO     = ld.so
 
-all: $(TARGET_A) $(TARGET_SO) $(START_O_PIC)
+all: $(TARGET_A) $(TARGET_SO) $(START_O_PIC) $(LD_SO)
 
 $(TARGET_A): $(OBJS)
 	$(AR) rcs $@ $^
@@ -55,8 +56,19 @@ $(TARGET_SO): $(ALL_PIC_OBJS) libc.ld
 	      --hash-style=both -soname=libc.so \
 	      -T libc.ld -o $@ $(ALL_PIC_OBJS)
 
+# Userspace dynamic linker (PT_INTERP interpreter). Self-contained, no libc.
+ldso/start.o: ldso/start.S
+	$(CC) $(CFLAGS) -c $< -o $@
+
+ldso/ldso.o: ldso/ldso.c ldso/ldso.h
+	$(CC) $(CFLAGS) -O2 -c $< -o $@
+
+$(LD_SO): ldso/start.o ldso/ldso.o ldso/ldso.ld
+	$(LD) -m elf_i386 -nostdlib -T ldso/ldso.ld -o $@ ldso/start.o ldso/ldso.o
+
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET_A) $(TARGET_SO)
+	rm -rf $(BUILD_DIR) $(TARGET_A) $(TARGET_SO) $(LD_SO)
+	rm -f ldso/start.o ldso/ldso.o
 
 version:
 	@echo "CactLib version: $(VERSION)"

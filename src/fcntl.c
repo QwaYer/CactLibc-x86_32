@@ -1,5 +1,7 @@
 #include "fcntl.h"
 #include "syscall.h"
+#include "nodeio.h"
+#include "errno.h"
 #include <stdarg.h>
 #include <stdint.h>
 
@@ -12,5 +14,31 @@ int fcntl(int fd, int cmd, ...) {
     va_start(ap, cmd);
     int arg = va_arg(ap, int);
     va_end(ap);
-    return (int)syscall(SYS_FCNTL, (uintptr_t)fd, (uintptr_t)cmd, (uintptr_t)arg);
+
+    if (cmd == F_DUPFD) {
+        /* F_DUPFD: дублировать начиная со слота >= arg */
+        cact_fcntl_arg_t a;
+        a.cmd = CACT_F_DUPFD;
+        a.arg = (uint32_t)arg;
+        return nio_map(nio_ioctl(fd, CACT_FDCTL_FCNTL, &a));
+    }
+    if (cmd == F_GETFD || cmd == F_GETFL) {
+        cact_fcntl_arg_t a;
+        a.cmd = (uint32_t)cmd;
+        a.arg = 0;
+        return nio_map(nio_ioctl(fd, CACT_FDCTL_FCNTL, &a));
+    }
+    if (cmd == F_SETFD || cmd == F_SETFL) {
+        cact_fcntl_arg_t a;
+        a.cmd = (uint32_t)cmd;
+        a.arg = (uint32_t)arg;
+        return nio_map(nio_ioctl(fd, CACT_FDCTL_FCNTL, &a));
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+int creat(const char *pathname, int mode) {
+    (void)mode;
+    return open(pathname, O_WRONLY | O_CREAT | O_TRUNC);
 }

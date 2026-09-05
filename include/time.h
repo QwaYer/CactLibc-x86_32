@@ -29,8 +29,16 @@ struct timespec {
 #define CLOCK_MONOTONIC 1
 
 time_t time(time_t *t);
+double difftime(time_t time1, time_t time0);
 struct tm *gmtime(const time_t *timep);
+struct tm *gmtime_r(const time_t *timep, struct tm *result);
 struct tm *localtime(const time_t *timep);
+struct tm *localtime_r(const time_t *timep, struct tm *result);
+time_t mktime(struct tm *tm);
+char *asctime(const struct tm *tm);
+char *asctime_r(const struct tm *tm, char *buf);
+char *ctime(const time_t *timep);
+char *ctime_r(const time_t *timep, char *buf);
 int gettimeofday(struct timeval *tv, void *tz);
 int clock_gettime(int clkid, struct timespec *tp);
 int nanosleep(const struct timespec *req, struct timespec *rem);
