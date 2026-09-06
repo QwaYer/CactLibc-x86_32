@@ -5,6 +5,7 @@
 #include "syscall.h"
 
 /* ── Address families ─────────────────────────────────────────────────────── */
+#define AF_UNIX     1
 #define AF_INET     2
 
 /* ── Socket types ─────────────────────────────────────────────────────────── */
@@ -46,6 +47,11 @@ struct sockaddr_in {
     uint16_t sin_port;   /* network byte order — use htons() */
     uint32_t sin_addr;   /* network byte order — use htonl() */
     uint8_t  sin_zero[8];
+};
+
+struct sockaddr_un {
+    uint16_t sun_family;   /* AF_UNIX */
+    char     sun_path[108];
 };
 
 /* ── Byte-order helpers ───────────────────────────────────────────────────── */
@@ -98,16 +104,17 @@ typedef struct {
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 int socket    (int domain, int type, int protocol);
-int bind      (int fd, const struct sockaddr_in *addr, uint32_t addrlen);
-int connect   (int fd, const struct sockaddr_in *addr, uint32_t addrlen);
+int socketpair(int domain, int type, int protocol, int sv[2]);
+int bind      (int fd, const struct sockaddr *addr, uint32_t addrlen);
+int connect   (int fd, const struct sockaddr *addr, uint32_t addrlen);
 int listen    (int fd, int backlog);
-int accept    (int fd, struct sockaddr_in *peer, uint32_t *addrlen);
+int accept    (int fd, struct sockaddr *addr, uint32_t *addrlen);
 int send      (int fd, const void *buf, uint32_t len, int flags);
 int recv      (int fd, void *buf, uint32_t len, int flags);
 int sendto    (int fd, const void *buf, uint32_t len, int flags,
-               const struct sockaddr_in *dest, uint32_t addrlen);
+               const struct sockaddr *dest, uint32_t addrlen);
 int recvfrom  (int fd, void *buf, uint32_t len, int flags,
-               struct sockaddr_in *src, uint32_t *addrlen);
+               struct sockaddr *src, uint32_t *addrlen);
 int shutdown  (int fd, int how);
 int setsockopt(int fd, int level, int optname,
                const void *optval, uint32_t optlen);
