@@ -2,6 +2,9 @@
 #include "nodeio.h"
 #include "syscall.h"
 #include "errno.h"
+#include "stdlib.h"
+#include "string.h"
+#include "unistd.h"
 #include <stdint.h>
 
 #ifndef EAFNOSUPPORT
@@ -155,6 +158,136 @@ int recv(int fd, void *buf, uint32_t len, int flags) {
     int r = (int)syscall(SYS_READ, (uintptr_t)fd, (uintptr_t)buf, (uintptr_t)len);
     if (r < 0) { errno = -r; return -1; }
     return r;
+}
+
+/* ── sendmsg / recvmsg (SCM_RIGHTS over AF_UNIX stream) ─────────────────── */
+
+ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
+    (void)flags;
+    if (!msg || !msg->msg_iov || msg->msg_iovlen <= 0) { errno = EINVAL; return -1; }
+
+    uint32_t total = 0;
+    for (int i = 0; i < msg->msg_iovlen; i++) {
+        uint32_t l = (uint32_t)msg->msg_iov[i].iov_len;
+        if (total + l < total) { errno = EINVAL; return -1; }
+        total += l;
+    }
+
+    unsigned char *buf = 0;
+    if (total) {
+        buf = (unsigned char *)malloc(total);
+        if (!buf) { errno = ENOMEM; return -1; }
+        uint32_t off = 0;
+        for (int i = 0; i < msg->msg_iovlen; i++) {
+            uint32_t l = (uint32_t)msg->msg_iov[i].iov_len;
+            if (l) {
+                memcpy(buf + off, msg->msg_iov[i].iov_base, l);
+                off += l;
+            }
+        }
+    }
+
+    int32_t fds[16];
+    uint32_t nfds = 0;
+    if (msg->msg_control && msg->msg_controllen) {
+        for (struct cmsghdr *c = CMSG_FIRSTHDR((struct msghdr *)msg);
+             c && nfds < 16;
+             c = CMSG_NXTHDR((struct msghdr *)msg, c)) {
+            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+                uint32_t hdr = CMSG_ALIGN(sizeof(struct cmsghdr));
+                uint32_t bytes = (c->cmsg_len >= hdr) ? c->cmsg_len - hdr : 0;
+                int cnt = (int)(bytes / sizeof(int32_t));
+                if (cnt > 16 - (int)nfds) cnt = 16 - (int)nfds;
+                memcpy(fds + nfds, CMSG_DATA(c), (uint32_t)cnt * sizeof(int32_t));
+                nfds += (uint32_t)cnt;
+            }
+        }
+    }
+
+    cact_sendmsg_arg_t a;
+    a.buf  = buf;
+    a.len  = total;
+    a.fds  = nfds ? fds : 0;
+    a.nfds = nfds;
+    int r = nio_ioctl(fd, CACT_SOCKCTL_SENDMSG, &a);
+    if (total) free(buf);
+    if (r < 0) { errno = -r; return -1; }
+    return (ssize_t)r;
+}
+
+ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
+    (void)flags;
+    if (!msg) { errno = EINVAL; return -1; }
+
+    uint32_t cap = 0;
+    if (msg->msg_iov && msg->msg_iovlen > 0) {
+        for (int i = 0; i < msg->msg_iovlen; i++)
+            cap += (uint32_t)msg->msg_iov[i].iov_len;
+    }
+
+    unsigned char *buf = 0;
+    if (cap) {
+        buf = (unsigned char *)malloc(cap);
+        if (!buf) { errno = ENOMEM; return -1; }
+    }
+
+    int32_t fds[16];
+    cact_recvmsg_arg_t a;
+    a.buf      = buf;
+    a.cap      = cap;
+    a.fds      = fds;
+    a.fds_cap  = 16;
+    a.fds_len  = 0;
+    int r = nio_ioctl(fd, CACT_SOCKCTL_RECVMSG, &a);
+    if (r < 0) {
+        if (cap) free(buf);
+        errno = -r;
+        return -1;
+    }
+    int got = r;
+    uint32_t nfds = a.fds_len;
+
+    /* scatter payload into the iov */
+    uint32_t off = 0;
+    for (int i = 0; i < msg->msg_iovlen && off < (uint32_t)got; i++) {
+        uint32_t l = (uint32_t)msg->msg_iov[i].iov_len;
+        uint32_t take = got - off;
+        if (take > l) take = l;
+        if (take && buf) memcpy(msg->msg_iov[i].iov_base, buf + off, take);
+        off += take;
+    }
+    if (cap) free(buf);
+
+    msg->msg_flags = 0;
+    if (msg->msg_name && msg->msg_namelen >= sizeof(uint16_t))
+        ((struct sockaddr *)msg->msg_name)->sa_family = AF_UNIX;
+    msg->msg_namelen = 0;
+
+    if (nfds == 0) {
+        msg->msg_controllen = 0;
+        return (ssize_t)got;
+    }
+
+    if (msg->msg_control && msg->msg_controllen >= sizeof(struct cmsghdr)) {
+        uint32_t need = CMSG_SPACE(nfds * sizeof(int32_t));
+        if (need <= msg->msg_controllen) {
+            struct cmsghdr *c = (struct cmsghdr *)msg->msg_control;
+            c->cmsg_len   = CMSG_LEN(nfds * sizeof(int32_t));
+            c->cmsg_level = SOL_SOCKET;
+            c->cmsg_type  = SCM_RIGHTS;
+            memcpy(CMSG_DATA(c), fds, nfds * sizeof(int32_t));
+            msg->msg_controllen = need;
+        } else {
+            for (uint32_t i = 0; i < nfds; i++) close((int)fds[i]);
+            msg->msg_controllen = 0;
+            msg->msg_flags |= MSG_CTRUNC;
+        }
+    } else {
+        for (uint32_t i = 0; i < nfds; i++) close((int)fds[i]);
+        msg->msg_controllen = 0;
+        msg->msg_flags |= MSG_CTRUNC;
+    }
+    return (ssize_t)got;
 }
 
 int sendto(int fd, const void *buf, uint32_t len, int flags,
