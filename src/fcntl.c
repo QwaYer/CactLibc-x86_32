@@ -15,12 +15,24 @@ int fcntl(int fd, int cmd, ...) {
     int arg = va_arg(ap, int);
     va_end(ap);
 
-    if (cmd == F_DUPFD) {
+    if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
         /* F_DUPFD: дублировать начиная со слота >= arg */
         cact_fcntl_arg_t a;
         a.cmd = CACT_F_DUPFD;
         a.arg = (uint32_t)arg;
-        return nio_map(nio_ioctl(fd, CACT_FDCTL_FCNTL, &a));
+        int r = nio_map(nio_ioctl(fd, CACT_FDCTL_FCNTL, &a));
+        if (r < 0) return r;
+        if (cmd == F_DUPFD_CLOEXEC) {
+            cact_fcntl_arg_t f;
+            f.cmd = F_SETFD;
+            f.arg = FD_CLOEXEC;
+            if (nio_map(nio_ioctl(r, CACT_FDCTL_FCNTL, &f)) < 0) {
+                close(r);
+                errno = EINVAL;
+                return -1;
+            }
+        }
+        return r;
     }
     if (cmd == F_GETFD || cmd == F_GETFL) {
         cact_fcntl_arg_t a;

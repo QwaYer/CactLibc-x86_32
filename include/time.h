@@ -20,13 +20,24 @@ struct timeval {
     long tv_usec;
 };
 
+struct timezone {
+    int tz_minuteswest;
+    int tz_dsttime;
+};
+
 struct timespec {
     long tv_sec;
     long tv_nsec;
 };
 
+struct itimerspec {
+    struct timespec it_interval;   /* period between expirations         */
+    struct timespec it_value;      /* time until first expiration        */
+};
+
 #define CLOCK_REALTIME  0
 #define CLOCK_MONOTONIC 1
+#define TIMER_ABSTIME   1
 
 time_t time(time_t *t);
 double difftime(time_t time1, time_t time0);

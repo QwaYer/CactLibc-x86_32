@@ -5,7 +5,8 @@
 #include "fcntl.h"
 #include "select.h"
 #include "poll.h"
-#include "sys/uio.h"
+#include "signal.h"
+#include "uio.h"
 #include <stdint.h>
 
 /* ── жизненный цикл процесса (core traps) ── */
@@ -544,4 +545,26 @@ int uname(struct utsname *buf) {
 
 int execvp(const char *file, char *const argv[]) {
     return execve(file, argv, environ);
+}
+
+int isatty(int fd) {
+    /* TIOCGWINSZ is answered by the kernel only for terminal nodes. */
+    struct winsize ws;
+    struct winsize *p = &ws;
+    int r = nio_ioctl(fd, TIOCGWINSZ, p);
+    return (r >= 0) ? 1 : 0;
+}
+
+int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout_ts,
+          const sigset_t *sigmask) {
+    (void)sigmask;
+    int ms = -1;
+    if (timeout_ts) {
+        long long m = timeout_ts->tv_sec * 1000LL +
+                      timeout_ts->tv_nsec / 1000000LL;
+        if (m < 0) m = 0;
+        if (m > 2147483647LL) m = 2147483647LL;
+        ms = (int)m;
+    }
+    return poll(fds, (int)nfds, ms);
 }

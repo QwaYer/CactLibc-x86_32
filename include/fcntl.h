@@ -13,11 +13,12 @@
 #define O_EXCL      0x0080
 
 /* fcntl() commands */
-#define F_DUPFD     0   /* duplicate file descriptor (>= arg) */
-#define F_GETFD     1   /* get file descriptor flags */
-#define F_SETFD     2   /* set file descriptor flags */
-#define F_GETFL     3   /* get file status flags */
-#define F_SETFL     4   /* set file status flags */
+#define F_DUPFD         0   /* duplicate file descriptor (>= arg) */
+#define F_GETFD         1   /* get file descriptor flags */
+#define F_SETFD         2   /* set file descriptor flags */
+#define F_GETFL         3   /* get file status flags */
+#define F_SETFL         4   /* set file status flags */
+#define F_DUPFD_CLOEXEC 1030 /* duplicate file descriptor (>= arg) + FD_CLOEXEC */
 
 /* File descriptor flags (used with F_GETFD / F_SETFD) */
 #define FD_CLOEXEC  1   /* close-on-exec */

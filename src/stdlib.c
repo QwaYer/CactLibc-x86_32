@@ -6,7 +6,7 @@
 #include "fcntl.h"
 #include "stat.h"
 #include "errno.h"
-#include "sys/random.h"
+#include "random.h"
 #include <stdint.h>
 
 #define ATEXIT_MAX 32

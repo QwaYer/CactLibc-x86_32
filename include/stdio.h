@@ -43,6 +43,7 @@ int rename(const char *oldpath, const char *newpath);
 
 FILE *fopen(const char *pathname, const char *mode);
 FILE *fdopen(int fd, const char *mode);
+FILE *open_memstream(char **ptr, size_t *sizeloc);
 int fclose(FILE *stream);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);

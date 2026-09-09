@@ -7,6 +7,7 @@ double tan(double x);
 double sqrt(double x);
 double floor(double x);
 double ceil(double x);
+double round(double x);
 double fabs(double x);
 double log(double x);
 double log10(double x);

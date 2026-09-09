@@ -51,6 +51,33 @@ int sigreturn(void) {
     return (int)syscall(SYS_SIGRETURN, 0, 0, 0);
 }
 
+int sigaddset(sigset_t *set, int signum) {
+    if (!set) { errno = EINVAL; return -1; }
+    int idx = sig_number_to_sigindex(signum);
+    if (idx < 0) { errno = EINVAL; return -1; }
+    *set |= (1u << idx);
+    return 0;
+}
+
+int sigdelset(sigset_t *set, int signum) {
+    if (!set) { errno = EINVAL; return -1; }
+    int idx = sig_number_to_sigindex(signum);
+    if (idx < 0) { errno = EINVAL; return -1; }
+    *set &= ~(1u << idx);
+    return 0;
+}
+
+int sigismember(const sigset_t *set, int signum) {
+    if (!set) { errno = EINVAL; return -1; }
+    int idx = sig_number_to_sigindex(signum);
+    if (idx < 0) { errno = EINVAL; return -1; }
+    return (*set & (1u << idx)) ? 1 : 0;
+}
+
+int raise(int sig) {
+    return kill(getpid(), sig);
+}
+
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     cact_sigprocmask_arg_t a;
     a.how    = (uint32_t)how;

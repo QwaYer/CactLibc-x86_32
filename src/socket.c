@@ -2,6 +2,7 @@
 #include "nodeio.h"
 #include "syscall.h"
 #include "errno.h"
+#include "fcntl.h"
 #include "stdlib.h"
 #include "string.h"
 #include "unistd.h"
@@ -20,13 +21,37 @@ static uint16_t _family(const struct sockaddr *sa) {
     return f;
 }
 
+static int _fd_apply_flags(int fd, int type_flags) {
+    if (type_flags & SOCK_CLOEXEC) {
+        cact_fcntl_arg_t f;
+        f.cmd = F_SETFD;
+        f.arg = FD_CLOEXEC;
+        if (nio_map(nio_ioctl(fd, CACT_FDCTL_FCNTL, &f)) < 0)
+            return -1;
+    }
+    if (type_flags & SOCK_NONBLOCK) {
+        cact_fcntl_arg_t f;
+        f.cmd = F_SETFL;
+        f.arg = O_NONBLOCK;
+        if (nio_map(nio_ioctl(fd, CACT_FDCTL_FCNTL, &f)) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 int socket(int domain, int type, int protocol) {
+    int flags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
     cact_socket_arg_t a;
     a.domain = (uint32_t)domain;
-    a.type   = (uint32_t)type;
+    a.type   = (uint32_t)(type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK));
     a.proto  = (uint32_t)protocol;
     int r = nio_dev_cmd("net", CACT_NETCTL_SOCKET, &a);
     if (r < 0) { errno = -r; return -1; }
+    if (flags && _fd_apply_flags(r, flags) < 0) {
+        close(r);
+        errno = EINVAL;
+        return -1;
+    }
     return r;
 }
 
@@ -34,14 +59,23 @@ int socketpair(int domain, int type, int protocol, int sv[2]) {
     (void)protocol;
     if (domain != AF_UNIX) { errno = EAFNOSUPPORT; return -1; }
     if (!sv)               { errno = EINVAL;       return -1; }
+    int flags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
     cact_socketpair_arg_t a;
-    a.type = (uint32_t)type;
+    a.type = (uint32_t)(type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK));
     a.fds[0] = 0;
     a.fds[1] = 0;
     int r = nio_dev_cmd("net", CACT_NETCTL_SOCKETPAIR, &a);
     if (r < 0) { errno = -r; return -1; }
     sv[0] = (int)a.fds[0];
     sv[1] = (int)a.fds[1];
+    if (flags) {
+        if (_fd_apply_flags(sv[0], flags) < 0 || _fd_apply_flags(sv[1], flags) < 0) {
+            close(sv[0]);
+            close(sv[1]);
+            errno = EINVAL;
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -144,6 +178,18 @@ int accept(int fd, struct sockaddr *addr, uint32_t *addrlen) {
         }
     }
     return r;
+}
+
+int accept4(int fd, struct sockaddr *addr, uint32_t *addrlen, int flags) {
+    int nfd = accept(fd, addr, addrlen);
+    if (nfd < 0) return nfd;
+    if ((flags & (SOCK_CLOEXEC | SOCK_NONBLOCK)) &&
+        _fd_apply_flags(nfd, flags) < 0) {
+        close(nfd);
+        errno = EINVAL;
+        return -1;
+    }
+    return nfd;
 }
 
 int send(int fd, const void *buf, uint32_t len, int flags) {

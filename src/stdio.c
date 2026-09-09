@@ -659,3 +659,11 @@ int pclose(FILE *stream) {
     }
     return st;
 }
+
+/* CactOS: no dynamic memory FILEs. open_memstream() is used only by debug
+ * logging (WAYLAND_DEBUG); returning NULL makes callers bail out. */
+FILE *open_memstream(char **ptr, size_t *sizeloc) {
+    (void)ptr;
+    (void)sizeloc;
+    return 0;
+}

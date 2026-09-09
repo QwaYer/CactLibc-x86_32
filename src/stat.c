@@ -62,3 +62,9 @@ int chown(const char *path, int uid, int gid) {
     nio_close(fd);
     return nio_map(r);
 }
+
+int lstat(const char *path, struct stat *buf) {
+    /* CactOS VFS has no symlink following in stat(); the node stat is
+     * already that of the link itself. */
+    return stat(path, buf);
+}

@@ -1,4 +1,4 @@
-#include "sys/random.h"
+#include "random.h"
 #include "unistd.h"
 #include "fcntl.h"
 #include "errno.h"

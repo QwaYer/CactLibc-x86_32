@@ -1,4 +1,4 @@
-#include "sys/wait.h"
+#include "wait.h"
 #include "string.h"
 
 pid_t waitpid(pid_t pid, int *status, int options);

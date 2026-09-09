@@ -3,15 +3,26 @@
 
 #include <stdint.h>
 #include "syscall.h"
-#include "sys/uio.h"
+#include "uio.h"
 
 /* ── Address families ─────────────────────────────────────────────────────── */
 #define AF_UNIX     1
 #define AF_INET     2
+#define AF_LOCAL    AF_UNIX
+
+#define PF_UNIX     AF_UNIX
+#define PF_LOCAL    AF_UNIX
+#define PF_INET     AF_INET
 
 /* ── Socket types ─────────────────────────────────────────────────────────── */
 #define SOCK_STREAM  1
 #define SOCK_DGRAM   2
+
+/* Accepted in the type argument of socket/socketpair/accept4 */
+#define SOCK_CLOEXEC   0x80000   /* same bit as O_CLOEXEC */
+#define SOCK_NONBLOCK  0x800     /* same bit as O_NONBLOCK */
+
+typedef uint32_t socklen_t;
 
 /* ── Protocol numbers ─────────────────────────────────────────────────────── */
 #define IPPROTO_TCP   6
@@ -26,8 +37,10 @@
 #define SHUT_RDWR  2
 
 /* ── sendmsg/recvmsg flags & message structures ──────────────────────────── */
-#define MSG_CTRUNC   0x8
-#define MSG_TRUNC    0x20
+#define MSG_CTRUNC    0x8
+#define MSG_TRUNC     0x20
+#define MSG_DONTWAIT  0x40
+#define MSG_NOSIGNAL  0x4000
 
 struct msghdr {
     void     *msg_name;
@@ -80,6 +93,14 @@ static inline struct cmsghdr *__cmsg_next(struct msghdr *mh,
 #define SO_REUSEADDR  2
 #define SO_KEEPALIVE  9
 #define SO_ERROR      4
+#define SO_PEERCRED   17
+
+/* Peer credentials (only used for AF_UNIX peer querying) */
+struct ucred {
+    uint32_t pid;
+    uint32_t uid;
+    uint32_t gid;
+};
 
 /* ── IPPROTO_TCP option names ─────────────────────────────────────────────── */
 #define TCP_NODELAY   1
@@ -157,6 +178,7 @@ int bind      (int fd, const struct sockaddr *addr, uint32_t addrlen);
 int connect   (int fd, const struct sockaddr *addr, uint32_t addrlen);
 int listen    (int fd, int backlog);
 int accept    (int fd, struct sockaddr *addr, uint32_t *addrlen);
+int accept4   (int fd, struct sockaddr *addr, uint32_t *addrlen, int flags);
 int send      (int fd, const void *buf, uint32_t len, int flags);
 int recv      (int fd, void *buf, uint32_t len, int flags);
 ssize_t sendmsg(int fd, const struct msghdr *msg, int flags);

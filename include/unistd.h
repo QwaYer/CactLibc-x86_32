@@ -129,3 +129,5 @@ extern int optopt;
 int getopt(int argc, char *const argv[], const char *optstring);
 
 #endif
+
+int isatty(int fd);

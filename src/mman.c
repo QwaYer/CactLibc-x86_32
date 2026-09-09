@@ -1,4 +1,4 @@
-#include "sys/mman.h"
+#include "mman.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -35,4 +35,11 @@ int munmap(void *addr, size_t length)
 int mprotect(void *addr, size_t length, int prot)
 {
     return (int)syscall(SYS_MPROTECT, (uintptr_t)addr, (uintptr_t)length, (uintptr_t)prot);
+}
+
+int msync(void *addr, size_t length, int flags)
+{
+    /* RAM-backed anonymous/memfd mappings need no writeback. */
+    (void)addr; (void)length; (void)flags;
+    return 0;
 }

@@ -76,18 +76,26 @@ typedef void (*sighandler_t)(int);
 
 /* SA_SIGINFO: sigaction flag for sa_sigaction handler */
 #define SA_SIGINFO 0x0004
+#define SA_NODEFER 0x40000000
 
 /* FPE signal code constants */
 #define FPE_INTDIV 1
 #define FPE_FLTDIV 2
 
 typedef struct {
-    int si_signo;
-    int si_code;
+    int   si_signo;
+    int   si_code;
+    void *si_addr;
 } siginfo_t;
 
 #define sigemptyset(set)    (*(set) = 0)
-#define sigaddset(set, n)   (*(set) |= (1u << (n)))
+
+/* sigaddset/sigdelset/sigismember translate their signum argument like
+ * sigaction()/kill() do, so either kernel bitmask constants (SIGTERM etc.)
+ * or classic numbers are accepted. */
+int sigaddset(sigset_t *set, int signum);
+int sigdelset(sigset_t *set, int signum);
+int sigismember(const sigset_t *set, int signum);
 
 /* Индекс в таблице обработчиков ядра (тот же номер бита маски для доставленных сигналов). */
 #define KERNEL_NSIG 13
@@ -110,5 +118,6 @@ int          setitimer(int which, const struct itimerval *new_value,
 
 sighandler_t signal(int signum, sighandler_t handler);
 int          kill(pid_t pid, int sig);
+int          raise(int sig);
 
 #endif /* _SIGNAL_H */

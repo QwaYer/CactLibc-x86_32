@@ -4,6 +4,18 @@
 
 char **environ = 0;
 
+/* TRUE once the environment array has been replaced by a malloc'd copy.
+ * The initial array is borrowed from the exec stack (set by _start via
+ * __cact_init_env) and must never be free()d. */
+static int _env_owned = 0;
+
+void __cact_init_env(char **envp) {
+    if (envp && !environ) {
+        environ = envp;
+        _env_owned = 0;
+    }
+}
+
 static int _env_count(void) {
     int n = 0;
     if (environ) while (environ[n]) n++;
@@ -50,8 +62,9 @@ int setenv(const char *name, const char *value, int overwrite) {
     for (int k = 0; k < n; k++) ne[k] = environ[k];
     ne[n] = e;
     ne[n + 1] = 0;
-    if (environ) free(environ);
+    if (_env_owned && environ) free(environ);
     environ = ne;
+    _env_owned = 1;
     return 0;
 }
 
@@ -75,7 +88,8 @@ int putenv(char *string) {
     for (int k = 0; k < n; k++) ne[k] = environ[k];
     ne[n] = string;
     ne[n + 1] = 0;
-    if (environ) free(environ);
+    if (_env_owned && environ) free(environ);
     environ = ne;
+    _env_owned = 1;
     return 0;
 }
