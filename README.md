@@ -41,34 +41,36 @@ CactLib is the **contract surface** between user ELF binaries and the kernel. If
 
 **Recommended — full workspace**
 
-Clone **[CactOS-x86_32](https://github.com/QwaYer/CactOS-x86_32)** next to this tree and run **`make`** or **`make -C CactOS-x86_32 iso`** from their **common parent** — **CactOS** invokes **`make`** here as part of the full userland + ISO pipeline.
+Clone **[CactOS-x86_32](https://github.com/QwaYer/CactOS-x86_32)** next to this tree and run **`ninja -C CactOS-x86_32/build-meson stage`** from their **common parent** — **CactOS** drives `ninja` here as part of the full userland + ISO pipeline.
 
 **Standalone — this repository**
 
-**Requirements:** `gcc` with **`-m32`**, GNU **`binutils`**, **`make`**. On amd64 Debian/Ubuntu install **`gcc-multilib`** or an equivalent multilib toolchain.
+**Requirements:** **`clang`** with **`-m32`**, GNU **`binutils`**, **`meson`** and **`ninja`**.
 
 ```sh
-git clone https://github.com/QwaYer/CactLib-x86_32
-cd CactLib-x86_32
+git clone https://github.com/QwaYer/CactLibc-x86_32
+cd CactLibc-x86_32
 
-make              # clibc.so + ld.so + PIC objects under build/pic/
-make clean        # remove build/ trees and libraries
+meson setup build-meson --cross-file cross/i686-cact-clang.ini
+ninja -C build-meson        # build-meson/{clibc.so,ld.so,start.o}
+ninja -C build-meson clean
 ```
 
-**Default `CFLAGS`** (see [`Makefile`](Makefile)):
+**Default compile flags** (see [`meson.build`](meson.build)):
 
-```makefile
-CFLAGS = -m32 -ffreestanding -fno-pie -fno-stack-protector -nostdlib \
-         -Iinclude -Wall -Wextra
+```meson
+libc_c_args = ['-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib']
+# clibc.so objects take -fPIC from the target's `pic: true`
 ```
 
-**Static link example**
+**Static link example** (the archive is built on demand):
 
 ```sh
-gcc -m32 -nostdlib -ffreestanding -o myprogram myprogram.o libc.a
+ninja -C build-meson src/libc.a
+ld -m elf_i386 -nostdlib -o myprogram myprogram.o build-meson/src/libc.a
 ```
 
-**Shared / PIE note:** `clibc.so` is built as **`ET_DYN`** with a fixed link script (`libc.ld`). PIE executables link against **`build/pic/start.o`** + relocatable `*.o` from `build/pic/`.
+**Shared / PIE note:** `clibc.so` is built as **`ET_DYN`** with a fixed link script (`libc.ld`). PIE executables link against **`build-meson/start.o`** + **`build-meson/clibc.so`**.
 
 > ⚠️ **i686 only.** Building `-m32` will fail on a pure 64-bit toolchain without multilib.
 
@@ -100,7 +102,7 @@ CactLib-x86_32/
 │   ├── socket.h     sockaddr_in helpers + dns_resolve
 │   ├── stdio.h string.h stdlib.h unistd.h …
 │   └── sys/mman.h
-├── Makefile
+├── meson.build
 └── LICENSE          GPLv3
 ```
 
