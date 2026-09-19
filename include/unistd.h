@@ -29,6 +29,7 @@ typedef unsigned dev_t;
 #define RB_AUTOBOOT  0x01234567
 #define RB_HALT_SYSTEM 0xCDEF0123
 #define RB_POWER_OFF 0x4321FEDC
+#define RB_SUSPEND   0x53555350
 
 /* ── жизненный цикл процесса ── */
 ssize_t read(int fd, void *buf, size_t count);
