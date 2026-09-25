@@ -99,7 +99,7 @@ extern char **environ;
 
 #define MODULE_LOAD_ID_AUTO  ((unsigned)0xFFFFFFFFu)
 int     module_load(const char *path, unsigned vendor_id, unsigned device_id);
-/* NULL: unload usermod slot; "NAME": driver name; decimal string: [pci N] index (see /dev/modinfo) */
+/* NULL: unload every loaded module; "NAME": module/driver name; decimal string: [pci N] index (see /dev/modinfo) */
 int     module_unload(const char *target);
 
 /* ── uname ── */
