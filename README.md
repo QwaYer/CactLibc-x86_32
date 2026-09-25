@@ -6,13 +6,13 @@
   <img src="https://img.shields.io/badge/arch-i686-red.svg?style=for-the-badge" alt="Arch: i686">
   <img src="https://img.shields.io/badge/language-C%2FASM-orange.svg?style=for-the-badge" alt="Language: C/ASM">
   <img src="https://img.shields.io/badge/output-clibc.so-green.svg?style=for-the-badge" alt="clibc.so">
-  <img src="https://img.shields.io/badge/syscall-int%200x80-purple.svg?style=for-the-badge" alt="int 0x80">
+  <img src="https://img.shields.io/badge/syscall-sysenter%20%2B%20int%200x80-purple.svg?style=for-the-badge" alt="sysenter + int 0x80">
   <img src="https://img.shields.io/badge/status-1.0.0-yellow.svg?style=for-the-badge" alt="1.0.0">
 </p>
 
 <p align="center">
   A <strong>freestanding C library</strong> for <a href="https://github.com/QwaYer/CactOS-x86_32"><strong>CactOS</strong></a> user space on <strong>i686</strong>.<br>
-  No host libc — every OS entry goes through <code>int 0x80</code> with numbers from <a href="include/syscall.h"><code>include/syscall.h</code></a>, which must match <a href="https://github.com/QwaYer/CactKernel-x86_32"><strong>CactKernel-x86_32</strong></a> <code>syscalls.h</code>.
+  No host libc — every OS entry goes through <code>sysenter</code> (with an <code>int 0x80</code> fallback) using the numbers from <a href="include/syscall.h"><code>include/syscall.h</code></a>, which must match <a href="https://github.com/QwaYer/CactKernel-x86_32"><strong>CactKernel-x86_32</strong></a> <code>syscalls.h</code>; everything beyond the <strong>15</strong> traps is a VFS-node ioctl from <a href="include/ioctl_abi.h"><code>ioctl_abi.h</code></a>.
 </p>
 
 ---
@@ -21,17 +21,19 @@
 
 | | |
 |---|---|
-| **Sources** | 15 × `src/*.c` + `start.S` |
-| **Public headers** | 18 files under `include/` (including `sys/mman.h`) |
-| **Syscall IDs** | **95** — `SYS_SYSCALL_COUNT` mirrors the kernel enum |
-| **Runtime deps** | None (only the cross `gcc`/`ar`/`ld` toolchain) |
-| **Artifacts** | **`clibc.so`** (shared ET_DYN for PIE), **`build/pic/start.o`** (PIC `_start`) |
+| **Sources** | 37 × `src/*.c` + `src/start.S`, `src/setjmp.S` |
+| **Public headers** | 60 files under `include/` (including `sys/*.h`) |
+| **Syscall traps** | **15** (`SYS_SYSCALL_COUNT` mirrors the kernel enum); every other operation is a VFS-node ioctl |
+| **Runtime deps** | None (build-time: `clang -m32`, GNU `binutils`, `meson`, `ninja`) |
+| **Artifacts** | **`clibc.so`** (shared ET_DYN for PIE), **`build-meson/start.o`** (PIC `_start`) |
 
 CactLib is the **contract surface** between user ELF binaries and the kernel. If you add or renumber a syscall in the kernel, you **must**:
 
-1. Update **`include/syscall.h`** here to match **`Cact/kernel/core/syscalls/syscalls.h`**.
-2. Rebuild **`clibc.so`** (`make`).
+1. Update **`include/syscall.h`** here to match **`Cact/kernel/core/syscall/syscalls.h`**.
+2. Rebuild **`clibc.so`** (**`ninja -C build-meson`**).
 3. **Re-link every user program** (init, shell, demos, drivers’ staged ELFs) against the new archive / shared object.
+
+Adding a *feature* (a new ioctl) does not renumber traps: mirror the new command/struct in **`include/ioctl_abi.h`** instead, and wrap it in the matching `src/*.c`.
 
 **Ecosystem:** **[CactOS-x86_32](https://github.com/QwaYer/CactOS-x86_32)** (integrator) · **CactKernel** · **CactLib** · **Cactsole** · **Cgoct** · **LocalRepoCactOS** (`cctkfs.img` packer).
 
@@ -81,12 +83,16 @@ ld -m elf_i386 -nostdlib -o myprogram myprogram.o build-meson/src/libc.a
 ```
 CactLib-x86_32/
 ├── src/
-│   ├── stdio.c      printf family, puts, putchar, kprint (SYS_PRINT), rename
+│   ├── stdio.c      printf family (integers, %f/%e/%g, width/precision/#), puts, putchar, kprint
 │   ├── stdlib.c     malloc/brk heap, exit, atoi, itoa, …
 │   ├── string.c     memset, memcpy, strlen, strcmp, …
-│   ├── unistd.c     POSIX-like file + process + mount + module syscalls
-│   ├── socket.c     BSD sockets (stream/dgram)
-│   ├── dns.c        dns_resolve() → SYS_DNS_RESOLVE
+│   ├── unistd.c     POSIX-like file + process + mount + module wrappers
+│   ├── socket.c     BSD sockets (stream/dgram) + getsockname/getpeername
+│   ├── dns.c        dns_resolve() → /dev/net CACT_NETCTL_DNS_RESOLVE
+│   ├── crypto.c     /dev/crypto primitives (SHA, HMAC, HKDF, AES-GCM, X25519, P-256, sig/X.509)
+│   ├── tls.c        TLS 1.3 client — handshake, record layer, key schedule
+│   ├── tls_roots.c  PEM→DER CA-bundle loader for the chain verifier
+│   ├── nodeio.c     /dev, /proc and ioctl relay helpers (nio_*)
 │   ├── signal.c     signals, masks, alarm, interval timers
 │   ├── stat.c       stat, fstat
 │   ├── dirent.c     getdents
@@ -95,13 +101,18 @@ CactLib-x86_32/
 │   ├── shm.c        SysV shared memory wrappers
 │   ├── termios.c    tcgetattr / tcsetattr
 │   ├── time.c       clocks + nanosleep
-│   ├── syscall.c    variadic syscall() helper
-│   └── start.S      user _start (non-PIC + PIC flavours)
+│   ├── syscall.c    variadic syscall() helper (sysenter)
+│   ├── start.S      user _start (non-PIC + PIC flavours)
+│   └── …            env, epoll, eventfd, getopt, pthread, scanf, wait, …
 ├── include/
-│   ├── syscall.h    authoritative SYS_* list — keep identical to the kernel!
-│   ├── socket.h     sockaddr_in helpers + dns_resolve
+│   ├── syscall.h    authoritative SYS_* list — 15 traps, keep identical to the kernel!
+│   ├── ioctl_abi.h  every relay command/struct (FDCTL_*/SOCKCTL_*/NETCTL_*/CRYPTCTL_*)
+│   ├── nodeio.h     nio_open/read/write/ioctl/dev_cmd helpers
+│   ├── socket.h     sockaddr_in helpers + dns_resolve + getsockname/getpeername
+│   ├── crypto.h     cact_sha256/…, cact_aes*gcm_*, cact_x25519_*, cact_sig_verify, cact_x509_verify
+│   ├── tls.h        cact_tls_connect/read/write/close/set_roots
 │   ├── stdio.h string.h stdlib.h unistd.h …
-│   └── sys/mman.h
+│   └── sys/*.h
 ├── meson.build
 └── LICENSE          GPLv3
 ```
@@ -116,10 +127,10 @@ CactLib-x86_32/
 |----------|------|
 | `printf` | Tiny `printf` — see format limits below |
 | `puts` / `putchar` | Line / character output to fd 1 |
-| `kprint` | Writes to the kernel debug channel via **`SYS_PRINT`** |
+| `kprint` | Writes to **`/dev/console`** (kernel debug channel) through `nio_write` |
 | `rename` | `rename(2)` wrapper |
 
-> ⚠️ **`printf`** supports only **`%d` `%s` `%x` `%c` `%%`**. Width, precision, and floating-point formats are **not** implemented.
+> ⚠️ **`printf`** handles the integer, `%c`, `%s` and `%p` conversions plus the floating-point **`%f`/`%e`/`%g`** families (either case), the **`0`/`-`/`#`** flags and a width/precision (`.N` or `.*`); `%l`/`%ll` length modifiers are accepted. No locale, no `%n`, no positional arguments.
 
 ### `stdlib.h`
 
@@ -136,13 +147,13 @@ CactLib-x86_32/
 
 ### `unistd.h`
 
-Core POSIX-like wrappers: `read`, `write`, `open`, `close`, `fork`, `execve`, `getpid`, `getppid`, `waitpid`, `lseek`, `pipe`, `dup`, `dup2`, `select`, `poll`, `getcwd`, `chdir`, `mkdir`, `rmdir`, `ioctl`, `sleep`, `brk`, **`mount`/`umount`**, **`module_load` / `module_unload`** (**`SYS_MODULE_LOAD` 92**, **`SYS_MODULE_UNLOAD` 93**), and many more — always cross-check the `.c` file against [`syscall.h`](include/syscall.h).
+Core POSIX-like wrappers: `read`, `write`, `open`, `close`, `fork`, `execve`, `getpid`, `getppid`, `waitpid` (the `options` word is forwarded, so `WUNTRACED` reaches the kernel), `lseek`, `pipe`, `dup`, `dup2`, `select`, `poll`, `getcwd`, `chdir`, `mkdir`, `rmdir`, `ioctl`, `sleep`, `brk`, **`mount`/`umount`**, **`module_load` / `module_unload`**, and many more — always cross-check the `.c` file against [`syscall.h`](include/syscall.h).
 
 ### `socket.h`
 
-Full BSD-style set: `socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`, `getsockopt`.
+Full BSD-style set: `socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`, `getsockopt`, `getsockname`, `getpeername`.
 
-Additionally **`dns_resolve(const char *name, uint32_t *out_ip_host)`** wraps **`SYS_DNS_RESOLVE` (94)** — resolves a **dotted IPv4 literal** or performs a **blocking DNS A query** (requires the kernel to have a DNS server address from DHCP or `netcfg_set`). Return **`0`** on success, **`-1`** on error.
+Additionally **`dns_resolve(const char *name, uint32_t *out_ip_host)`** wraps **`CACT_NETCTL_DNS_RESOLVE` (0x3403)** on `/dev/net` — resolves a **dotted IPv4 literal** or performs a **blocking DNS A query** (requires the kernel to have a DNS server address from DHCP or `ip`). Return **`0`** on success, **`-1`** on error.
 
 ### `signal.h`
 
@@ -154,11 +165,13 @@ Additionally **`dns_resolve(const char *name, uint32_t *out_ip_host)`** wraps **
 |--------|------------|
 | **`sys/mman.h`** | `mmap`, `munmap`, `mprotect` |
 | **`shm.h`** | `shmget`, `shmat`, `shmdt`, `shmctl` |
-| **`time.h`** | `gettimeofday`, `clock_gettime`, `nanosleep` |
+| **`time.h`** | `gettimeofday`, `clock_gettime` (**`CLOCK_REALTIME`** from the RTC via `/proc/wallclock`; **`CLOCK_MONOTONIC`** from `/proc/time`), `nanosleep` |
+| **`crypto.h`** | `/dev/crypto` primitives: SHA-256/384, HMAC (+verify), HKDF, AES-128/256-GCM seal/open, X25519/P-256, `cact_sig_verify`, `cact_x509_verify` |
+| **`tls.h`** | `cact_tls_connect/read/write/close`, `cact_tls_set_roots`, `cact_tls_error` — TLS 1.3 client, keys stay in the process |
 | **`termios.h`** | `tcgetattr`, `tcsetattr` |
 | **`fcntl.h`** / **`poll.h`** / **`select.h`** | open flags, non-blocking pollable fds |
 
-> 💡 Thin libc wrappers for **`SYS_PING_ECHO` (90)** and **`SYS_NETCFG_SET` (91)** may be missing — call **`syscall()`** from [`syscall.c`](src/syscall.c) / inline helpers with the right argument packing as the kernel expects.
+> 💡 Network configuration and ICMP do **not** go through `syscall()`: use the `/dev/net` ioctls (`CACT_NETCTL_*` in [`ioctl_abi.h`](include/ioctl_abi.h)) through the **`nio_dev_cmd("net", …)`** helper in [`nodeio.h`](include/nodeio.h) — that is what `ip`, `ping` and `dhcpd` do.
 
 ---
 
@@ -188,51 +201,60 @@ struct block_header {
 
 ---
 
-## ⚙️ ABI — `int 0x80`
+## ⚙️ ABI — `sysenter` (15 traps)
 
-**Register convention (3-scalar syscalls):**
+**Register convention (`sysenter`, 3-scalar traps):**
 
 ```
 EAX = syscall number (SYS_*)
 EBX = 1st argument
-ECX = 2nd argument
-EDX = 3rd argument
+ESI = 2nd argument
+EDI = 3rd argument
 EAX ← return value (signed int semantics)
 ```
 
+`sysenter`/`sysexit` steal **ECX** (return ESP) and **EDX** (return EIP), which is why the second and third arguments travel in **ESI**/**EDI**; an `int 0x80` gate is kept as a fallback (`__syscallN` in [`syscall.h`](include/syscall.h)).
+
 ```c
-static inline int __syscall3(int num, int a1, int a2, int a3) {
-    int ret;
+static inline intptr_t __syscall3(int num, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
+    intptr_t ret;
     __asm__ volatile (
-        "int $0x80"
+        "movl %%esp, %%ecx\n\t"
+        "call 1f\n\t"
+        "1:\n\t"
+        "popl %%edx\n\t"
+        "addl $(2f - 1b), %%edx\n\t"
+        "sysenter\n\t"
+        "2:\n\t"
         : "=a"(ret)
-        : "a"(num), "b"(a1), "c"(a2), "d"(a3)
-        : "memory"
+        : "a"(num), "b"(a1), "S"(a2), "D"(a3)
+        : "ecx", "edx", "memory"
     );
     return ret;
 }
 ```
 
-Many syscalls pass a **pointer to a struct** in **EBX** (and sometimes use **`__syscall1`**). The kernel distinguishes those with `_needs_frame()` — see CactKernel **`syscall_handler`** in `mod.c`.
+Many traps take a **pointer/struct** (e.g. `SYS_MMAP`); the kernel dispatches those through its full frame path — `_needs_frame()` in CactKernel **`mod.c`**.
 
-**Sample numbers** (full table only in [`include/syscall.h`](include/syscall.h)):
+**The 15 traps** (authoritative list in [`include/syscall.h`](include/syscall.h)):
 
 | # | Constant | Typical use |
 |---|----------|-------------|
-| 0 | `SYS_PRINT` | Debug string to kernel console |
-| 3 | `SYS_FORK` | |
-| 5 | `SYS_EXIT` | |
-| 22 | `SYS_READ` | |
-| 23 | `SYS_WRITE` | |
-| 61 | `SYS_BRK` | |
-| 62 | `SYS_MMAP` | Uses full register frame in kernel |
-| 65 | `SYS_SHMGET` | |
-| 78 | `SYS_SOCKET` | |
-| 90 | `SYS_PING_ECHO` | ICMP echo helper (kernel / Rust path) |
-| 91 | `SYS_NETCFG_SET` | Push IPv4 / DHCP metadata into Rust stack |
-| 92 | `SYS_MODULE_LOAD` | |
-| 93 | `SYS_MODULE_UNLOAD` | |
-| 94 | `SYS_DNS_RESOLVE` | `dns_resolve()` |
+| 0 | `SYS_OPEN` | open a VFS node / file |
+| 1 | `SYS_CLOSE` | |
+| 2 | `SYS_READ` | |
+| 3 | `SYS_WRITE` | |
+| 4 | `SYS_IOCTL` | every relay command — see [`ioctl_abi.h`](include/ioctl_abi.h) |
+| 5 | `SYS_POLL` | |
+| 6 | `SYS_FORK` | |
+| 7 | `SYS_EXEC` | |
+| 8 | `SYS_EXIT` | |
+| 9 | `SYS_WAITPID` | |
+| 10 | `SYS_BRK` | heap |
+| 11 | `SYS_MMAP` | uses the full register frame in the kernel |
+| 12 | `SYS_MUNMAP` | |
+| 13 | `SYS_MPROTECT` | |
+| 14 | `SYS_SIGRETURN` | signal-return trampoline |
 
 ---
 
