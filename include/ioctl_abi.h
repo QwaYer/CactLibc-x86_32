@@ -145,6 +145,10 @@ typedef struct cact_proc_info {
 // /proc/time — binary read-only (8 bytes), monotonic since boot.
 typedef struct cact_time { uint32_t sec; uint32_t usec; } cact_time_t;
 
+// /proc/wallclock — binary read-only, same cact_time_t layout: civil time,
+// seconds since the Unix epoch, taken from the CMOS RTC read at boot.  This is
+// what CLOCK_REALTIME/gettimeofday()/time() report; /proc/time stays monotonic.
+
 // /proc/uname — binary read-only, layout matches struct utsname (Linux i386).
 typedef struct cact_uname {
     char sysname[65];
@@ -202,10 +206,13 @@ typedef struct cact_shmctl_arg { uint32_t shmid; uint32_t cmd; void *buf; } cact
 #define CACT_SOCKCTL_UNIX_CONNECT 0x330B // AF_UNIX connect: arg=cact_unix_addr_t*
 #define CACT_SOCKCTL_SENDMSG    0x330C  // payload + SCM_RIGHTS: arg=cact_sendmsg_arg_t*
 #define CACT_SOCKCTL_RECVMSG    0x330D  // payload + SCM_RIGHTS: arg=cact_recvmsg_arg_t*
+#define CACT_SOCKCTL_GETSOCKNAME 0x330E // arg=cact_sockname_arg_t*; local addr out
+#define CACT_SOCKCTL_GETPEERNAME 0x330F // arg=cact_sockname_arg_t*; peer addr out
 // AF_UNIX reuses CACT_SOCKCTL_LISTEN / ACCEPT / SHUTDOWN; data path is plain
 // read()/write() as for AF_INET sockets.  sendmsg/recvmsg ioctls add SCM_RIGHTS
 // fd passing on AF_UNIX stream sockets (payload stays a byte stream; passed fds
 // arrive as an ordered FIFO alongside it).
+//
 
 typedef struct cact_sockaddr_in {
     uint32_t addr;   // IPv4 big-endian
@@ -249,6 +256,13 @@ typedef struct cact_accept_arg {
     uint32_t addrlen;            // in/out
 } cact_accept_arg_t;
 
+// getsockname()/getpeername(): the kernel fills addr, and addrlen is in (bytes
+// the caller's buffer can hold) then out (bytes written), like accept's.
+typedef struct cact_sockname_arg {
+    cact_sockaddr_in_t addr;     // out
+    uint32_t addrlen;            // in/out
+} cact_sockname_arg_t;
+
 // socket option levels/names (kernel socket.h values; relay passes them through)
 //   level: SOL_SOCKET=1, IPPROTO_TCP=6
 //   SOL_SOCKET names: SO_REUSEADDR=2, SO_KEEPALIVE=9, SO_ERROR=4
@@ -272,6 +286,7 @@ typedef struct cact_recvfrom_arg {
     uint32_t len;
 } cact_recvfrom_arg_t;
 
+
 // ===========================================================================
 // /dev/net control. RANGE 0x3400.
 // ===========================================================================
@@ -281,10 +296,23 @@ typedef struct cact_recvfrom_arg {
 #define CACT_NETCTL_NETCFG       0x3404  // arg=cact_netcfg_arg_t* (root): set link config
 #define CACT_NETCTL_SOCKETPAIR   0x3405  // arg=cact_socketpair_arg_t*; fds[2] out
 #define CACT_NETCTL_NETCFG_GET   0x3406  // arg=cact_netcfg_get_t* (out): read link config
+#define CACT_NETCTL_PING_WAIT    0x3407  // arg=cact_ping_wait_arg_t*; returns RTT us or <0
 
 typedef struct cact_socket_arg { uint32_t domain; uint32_t type; uint32_t proto; } cact_socket_arg_t;
 typedef struct cact_socketpair_arg { uint32_t type; uint32_t fds[2]; } cact_socketpair_arg_t;
 typedef struct cact_ping_arg { uint32_t dst_ip; uint32_t id; uint32_t seq; } cact_ping_arg_t;
+// Blocking probe: send one echo request and wait for its reply.  Returns the
+// round-trip time in microseconds, or <0 on timeout.  The out fields describe
+// the reply (source address in host order, ICMP message length in bytes).
+typedef struct cact_ping_wait_arg {
+    uint32_t dst_ip;      // host order
+    uint32_t id;
+    uint32_t seq;
+    uint32_t timeout_ms;
+    uint32_t rtt_us_out;
+    uint32_t src_ip_out;  // host order
+    uint32_t bytes_out;
+} cact_ping_wait_arg_t;
 typedef struct cact_dns_arg { char *name; uint32_t *out_ip; } cact_dns_arg_t;
 
 // Link configuration set by the network manager.  ip_host/mask 0 removes the
@@ -346,6 +374,21 @@ typedef struct cact_module_arg { char *path; uint32_t vendor_id; uint32_t device
 #define CACT_CRYPTCTL_AEAD        0x3706  // arg=cact_crypt_aead_arg_t*
 #define CACT_CRYPTCTL_KX_KEYGEN   0x3707  // arg=cact_crypt_kx_keygen_arg_t*
 #define CACT_CRYPTCTL_KX_DERIVE   0x3708  // arg=cact_crypt_kx_derive_arg_t*
+#define CACT_CRYPTCTL_SIG_VERIFY  0x3709  // arg=cact_crypt_sig_verify_arg_t*
+                                          // returns 0 valid, -1 invalid, -EINVAL bad args
+#define CACT_CRYPTCTL_X509_VERIFY  0x370A  // arg=cact_crypt_x509_verify_arg_t*
+                                          // returns 0 valid, -1 invalid, -EINVAL bad args
+
+// signature schemes for CACT_CRYPTCTL_SIG_VERIFY (order matches Cact_SIG_* in
+// cact_crypto/src/sig.rs)
+#define CACT_SIG_ECDSA_P256_SHA256 0
+#define CACT_SIG_ECDSA_P384_SHA384 1
+#define CACT_SIG_RSA_PKCS1_SHA256  2
+#define CACT_SIG_RSA_PKCS1_SHA384  3
+#define CACT_SIG_RSA_PKCS1_SHA512  4
+#define CACT_SIG_RSA_PSS_SHA256    5
+#define CACT_SIG_RSA_PSS_SHA384    6
+#define CACT_SIG_RSA_PSS_SHA512    7
 
 // algorithm selectors
 #define CACT_CRYPT_SHA256     0   // hash / hmac / hkdf: SHA-256 family
@@ -426,6 +469,42 @@ typedef struct cact_crypt_kx_derive_arg {
     uint8_t peer_pub[65]; // in: X25519 32 bytes / P-256 65 bytes (uncompressed)
     uint8_t shared[32];   // out
 } cact_crypt_kx_derive_arg_t;
+
+// Signature verification.  `pubkey` is the key exactly as a certificate carries
+// it — the SubjectPublicKeyInfo subjectPublicKey contents: a SEC1 point for
+// ECDSA, a DER RSAPublicKey for RSA.  `msg` is hashed internally with the
+// scheme's digest, so callers pass the message, not a prehash.
+typedef struct cact_crypt_sig_verify_arg {
+    uint32_t scheme;              // CACT_SIG_*
+    const uint8_t *pubkey;        // in
+    uint32_t pubkey_len;
+    const uint8_t *msg;           // in
+    uint32_t msg_len;
+    const uint8_t *sig;           // in (DER for ECDSA, raw for RSA)
+    uint32_t sig_len;
+} cact_crypt_sig_verify_arg_t;
+
+// Certificate chain verification (rustls-webpki in the kernel).  `chain` and
+// `roots` are buffers of concatenated DER certificates (each self-delimiting);
+// the leaf comes first in `chain`, and `roots` are the trust anchors the caller
+// wants to accept — the kernel keeps no trust policy of its own.
+//
+// `tls_scheme` != 0 additionally requires `hs_sig` to be a valid signature over
+// `hs_msg` made with the leaf's key, which is how a TLS 1.3 client checks the
+// server's CertificateVerify message.
+typedef struct cact_crypt_x509_verify_arg {
+    const uint8_t *chain;      // in: concatenated DER, leaf first
+    uint32_t chain_len;
+    const uint8_t *roots;      // in: concatenated DER trust anchors
+    uint32_t roots_len;
+    const char    *hostname;   // in: NUL-terminated name the leaf must match
+    uint64_t unix_time;        // in: verification time, seconds since epoch
+    uint32_t tls_scheme;       // in: TLS SignatureScheme code, 0 = skip
+    const uint8_t *hs_msg;     // in: signed handshake message
+    uint32_t hs_msg_len;
+    const uint8_t *hs_sig;     // in
+    uint32_t hs_sig_len;
+} cact_crypt_x509_verify_arg_t;
 
 // ===========================================================================
 // /dev/memfd control. RANGE 0x3800.
@@ -525,5 +604,28 @@ typedef struct cact_epoll_wait_arg {
     uint32_t maxevents;   // capacity (>= 1)
     int32_t  timeout_ms;  // -1 = block, 0 = non-blocking, >0 = deadline
 } cact_epoll_wait_arg_t;
+
+// ===========================================================================
+// tty control (ioctls on /dev/ttyN and /dev/tty). RANGE 0x3D00.
+//
+// These mirror the shape of Linux's VT_* ioctls, but take pointers because
+// the generic sys_ioctl path only forwards pointer arguments to a node.
+// ===========================================================================
+#define CACT_TTYCTL_GET_INDEX   0x3D00  // arg=int* -> VT index of this node (0 = active)
+#define CACT_TTYCTL_VT_ACTIVATE 0x3D01  // arg=int* -> switch the console to VT n
+#define CACT_TTYCTL_VT_GETSTATE 0x3D02  // arg=cact_vt_state_t*
+#define CACT_TTYCTL_SET_CTTY    0x3D03  // arg=int* -> make VT n the controlling terminal
+#define CACT_TTYCTL_GET_CTTY    0x3D04  // arg=int* -> controlling VT index (0 = none)
+
+typedef struct cact_vt_state {
+    uint16_t v_active;   // active VT
+    uint16_t v_count;    // number of VTs
+} cact_vt_state_t;
+
+// ===========================================================================
+// /dev/ptmx + /dev/pts/<n> control. RANGE 0x3E00.
+// ===========================================================================
+#define CACT_PTYCTL_GET_NUMBER  0x3E00  // master: arg=int* -> pts number
+#define CACT_PTYCTL_LOCK        0x3E01  // master: arg=int* -> 1 lock, 0 unlock the slave
 
 #endif

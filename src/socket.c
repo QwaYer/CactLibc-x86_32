@@ -378,6 +378,35 @@ int shutdown(int fd, int how) {
     return 0;
 }
 
+/* getsockname()/getpeername(): the kernel fills a cact_sockaddr_in_t (network
+   order addr+port) and reports the bytes it wrote in addrlen. */
+static int _sock_name(int fd, unsigned long cmd,
+                      struct sockaddr *addr, uint32_t *addrlen) {
+    if (!addr || !addrlen) { errno = EINVAL; return -1; }
+    cact_sockname_arg_t a;
+    __builtin_memset(&a, 0, sizeof(a));
+    a.addrlen = *addrlen;
+    int r = nio_ioctl(fd, cmd, &a);
+    if (r < 0) { errno = -r; return -1; }
+    if (a.addrlen < sizeof(struct sockaddr_in)) { errno = EINVAL; return -1; }
+
+    struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+    sin->sin_family = AF_INET;
+    sin->sin_port   = (uint16_t)a.addr.port;
+    sin->sin_addr   = a.addr.addr;
+    __builtin_memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
+    *addrlen = a.addrlen;
+    return 0;
+}
+
+int getsockname(int fd, struct sockaddr *addr, uint32_t *addrlen) {
+    return _sock_name(fd, CACT_SOCKCTL_GETSOCKNAME, addr, addrlen);
+}
+
+int getpeername(int fd, struct sockaddr *addr, uint32_t *addrlen) {
+    return _sock_name(fd, CACT_SOCKCTL_GETPEERNAME, addr, addrlen);
+}
+
 int setsockopt(int fd, int level, int optname,
                const void *optval, uint32_t optlen) {
     if (!optval || optlen < sizeof(int)) { errno = EINVAL; return -1; }

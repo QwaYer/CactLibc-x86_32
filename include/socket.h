@@ -179,6 +179,8 @@ int connect   (int fd, const struct sockaddr *addr, uint32_t addrlen);
 int listen    (int fd, int backlog);
 int accept    (int fd, struct sockaddr *addr, uint32_t *addrlen);
 int accept4   (int fd, struct sockaddr *addr, uint32_t *addrlen, int flags);
+int getsockname(int fd, struct sockaddr *addr, uint32_t *addrlen);
+int getpeername(int fd, struct sockaddr *addr, uint32_t *addrlen);
 int send      (int fd, const void *buf, uint32_t len, int flags);
 int recv      (int fd, void *buf, uint32_t len, int flags);
 ssize_t sendmsg(int fd, const struct msghdr *msg, int flags);
