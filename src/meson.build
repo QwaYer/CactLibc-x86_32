@@ -2,6 +2,7 @@
 # into libc.a here, and PIC by the root target that publishes start.o, exactly
 # as the Makefile did with build/ and build/pic/.
 libc_c_sources = files(
+  'crypto.c',
   'ctype.c',
   'dirent.c',
   'dlfcn.c',
@@ -26,6 +27,8 @@ libc_c_sources = files(
   'signalfd.c',
   'socket.c',
   'stat.c',
+  'tls.c',
+  'tls_roots.c',
   'stdio.c',
   'stdlib.c',
   'string.c',
