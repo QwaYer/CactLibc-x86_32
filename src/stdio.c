@@ -297,17 +297,198 @@ static int _fmt_u64(unsigned long long v, unsigned int base, int upper, char *ou
     return n;
 }
 
+
+/* ── float formatting ─────────────────────────────────────────────────────
+ * Neither %f/%e/%g nor an explicit precision (.N) used to be understood: the
+ * parser stopped at '.', so `%.1f` was printed as `%` + `.1f` and a percent
+ * sign in the text.  This adds both, without touching the integer paths.
+ *
+ * Floats are rendered from the value itself: sign, integer part, then a
+ * fraction scaled to 10^prec and rounded.  That is exact while the parts fit
+ * in 64 bits (~18 significant digits); beyond that %f falls back to the
+ * scientific form, which values that large would not fit the buffer for
+ * anyway. */
+static double _pow10_i(int n) {
+    double r = 1.0;
+    while (n-- > 0) r *= 10.0;
+    return r;
+}
+
+/* То же в long double: 64-битная мантисса хранит 10^prec и произведение на
+   дробную часть точно до 18 знаков, поэтому округление совпадает с точной
+   десятичной печатью, а не с накопленной ошибкой double. */
+static long double _pow10_ld(int n) {
+    long double r = 1.0L;
+    while (n-- > 0) r *= 10.0L;
+    return r;
+}
+
+/* Decimal digits of v, most significant first.  Returns the count. */
+static int _u64_digits(unsigned long long v, char *out) {
+    char rev[24];
+    int n = 0;
+    if (v == 0) rev[n++] = '0';
+    while (v) { rev[n++] = (char)('0' + (int)(v % 10)); v /= 10; }
+    for (int i = 0; i < n; i++) out[i] = rev[n - 1 - i];
+    return n;
+}
+
+#define _FMT_MAXPREC 18
+
+/* "123.456" — magnitude of v, no sign.  prec >= 0. */
+static int _fmt_fixed(double v, int prec, char *out, int cap) {
+    int n = 0;
+    if (prec > _FMT_MAXPREC) prec = _FMT_MAXPREC;
+    if (v >= 1.0e18) return -1;                 /* не влезает: caller уйдёт в %e */
+    unsigned long long ip = (unsigned long long)v;
+    double fr = v - (double)ip;
+    unsigned long long scale = (unsigned long long)_pow10_i(prec);
+    long double scaled = (long double)fr * _pow10_ld(prec);
+    unsigned long long fd = (unsigned long long)scaled;
+    long double rem = scaled - (long double)fd;
+    /* округление как в C: половина — к чётному (при prec==0 округляется
+       последняя цифра целой части, а не дробной) */
+    unsigned long long last = (prec == 0) ? (ip & 1ULL) : (fd & 1ULL);
+    if (rem > 0.5 || (rem == 0.5 && last)) fd += 1;
+    if (fd >= scale) { fd -= scale; ip += 1; }  /* округление перенеслось в целую часть */
+
+    char dig[24];
+    int dn = _u64_digits(ip, dig);
+    for (int i = 0; i < dn && n < cap - 1; i++) out[n++] = dig[i];
+
+    if (prec > 0) {
+        char fdg[24];
+        int fn = _u64_digits(fd, fdg);
+        if (n < cap - 1) out[n++] = '.';
+        for (int i = fn; i < prec && n < cap - 1; i++) out[n++] = '0';   /* ведущие нули дроби */
+        for (int i = 0; i < fn && n < cap - 1; i++) out[n++] = fdg[i];
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/* "1.234e+05" — magnitude of v, no sign.  prec >= 0 digits after the point. */
+static int _fmt_sci(double v, int prec, int upper, char *out, int cap) {
+    if (prec > _FMT_MAXPREC) prec = _FMT_MAXPREC;
+    int exp = 0;
+    double a = v;
+    if (a != 0.0) {
+        while (a >= 10.0) { a /= 10.0; exp++; }
+        while (a < 1.0)   { a *= 10.0; exp--; }
+    }
+    unsigned long long full = (unsigned long long)_pow10_i(prec);
+    long double scaled = (long double)a * _pow10_ld(prec);
+    unsigned long long m = (unsigned long long)scaled;
+    long double rem = scaled - (long double)m;
+    if (rem > 0.5 || (rem == 0.5 && (m & 1ULL))) m += 1;   /* половина — к чётному */
+    if (m >= full * 10ULL) { m /= 10ULL; exp++; }        /* 9.99… -> 1.0e+1 */
+
+    char dig[24];
+    int dn = _u64_digits(m, dig);
+    int n = 0;
+    for (int i = dn; i < prec + 1; i++) { if (n < cap - 1) out[n++] = '0'; }  /* выровнять мантиссу */
+    for (int i = 0; i < dn && n < cap - 1; i++) out[n++] = dig[i];
+    if (prec > 0 && n < cap - 1) {
+        /* точка после первой цифры: сдвигаем хвост */
+        for (int i = n; i > 1; i--) out[i] = out[i - 1];
+        out[1] = '.';
+        n++;
+    }
+    if (n < cap - 1) out[n++] = upper ? 'E' : 'e';
+    if (n < cap - 1) out[n++] = (exp < 0) ? '-' : '+';
+    int ae = exp < 0 ? -exp : exp;
+    if (ae < 10 && n < cap - 1) out[n++] = '0';
+    char ed[8];
+    int en = _u64_digits((unsigned long long)ae, ed);
+    for (int i = 0; i < en && n < cap - 1; i++) out[n++] = ed[i];
+    out[n] = '\0';
+    return n;
+}
+
+/* Убрать хвостовые нули (и точку) — нужно %g. */
+static void _strip_zeros(char *s, int *len) {
+    int n = *len, i = 0;
+    while (i < n && s[i] != '.' && s[i] != 'e' && s[i] != 'E') i++;
+    if (i >= n || s[i] != '.') return;
+    int end = i + 1;
+    while (end < n && s[end] >= '0' && s[end] <= '9') end++;
+    int j = end;
+    while (j > i + 1 && s[j - 1] == '0') j--;
+    if (j == i + 1) j = i;                       /* точка без дроби — убрать и её */
+    for (int k = j; k < n - (end - j); k++) s[k] = s[k + (end - j)];
+    *len = n - (end - j);
+}
+
+/* %f/%e/%g (и верхний регистр).  Знак обрабатывает вызывающий. */
+static int _fmt_double(double v, int prec, int conv, char *out, int cap) {
+    int upper = (conv >= 'A' && conv <= 'Z');
+    char mode  = (conv == 'e' || conv == 'E') ? 'e'
+               : (conv == 'g' || conv == 'G') ? 'g' : 'f';
+    int n;
+
+    if (v != v) {                                /* NaN */
+        const char *s = upper ? "NAN" : "nan";
+        n = 0;
+        while (*s && n < cap - 1) out[n++] = *s++;
+        out[n] = '\0';
+        return n;
+    }
+    if (v > 1.7976931348623157e308) {            /* +/- inf, знак у вызывающего */
+        const char *s = upper ? "INF" : "inf";
+        n = 0;
+        while (*s && n < cap - 1) out[n++] = *s++;
+        out[n] = '\0';
+        return n;
+    }
+
+    if (mode == 'g') {
+        if (prec == 0) prec = 1;
+        /* порядок числа решает, какая форма короче (правило C) */
+        int exp = 0;
+        double a = v;
+        if (a != 0.0) {
+            while (a >= 10.0) { a /= 10.0; exp++; }
+            while (a < 1.0)   { a *= 10.0; exp--; }
+        }
+        if (exp < -4 || exp >= prec) n = _fmt_sci(v, prec - 1, upper, out, cap);
+        else                         n = _fmt_fixed(v, prec - 1 - exp, out, cap);
+        if (n < 0) n = _fmt_sci(v, prec - 1, upper, out, cap);
+        _strip_zeros(out, &n);
+        return n;
+    }
+
+    if (mode == 'e') return _fmt_sci(v, prec, upper, out, cap);
+    n = _fmt_fixed(v, prec, out, cap);
+    return (n < 0) ? _fmt_sci(v, prec, upper, out, cap) : n;
+}
+
 int vfprintf(FILE *stream, const char *format, va_list args) {
     for (; *format; format++) {
         if (*format != '%') { fputc(*format, stream); continue; }
 
         format++;
-        int zero = 0, minus = 0, width = 0, islong = 0, isll = 0;
-        if (*format == '0') { zero = 1; format++; }
-        if (*format == '-') { minus = 1; format++; }
+        int zero = 0, minus = 0, hash = 0, width = 0, prec = -1, islong = 0, isll = 0;
+        for (;;) {
+            if (*format == '0') { zero = 1; format++; }
+            else if (*format == '-') { minus = 1; format++; }
+            else if (*format == '#') { hash = 1; format++; }
+            else break;
+        }
         while (*format >= '0' && *format <= '9') {
             width = width * 10 + (*format - '0');
             format++;
+        }
+        if (*format == '.') {
+            format++;
+            if (*format == '*') { prec = va_arg(args, int); format++; }
+            else {
+                prec = 0;
+                while (*format >= '0' && *format <= '9') {
+                    prec = prec * 10 + (*format - '0');
+                    format++;
+                }
+            }
+            if (prec < 0) prec = -1;
         }
         {
             int nl = 0;
@@ -370,6 +551,13 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
             len = _fmt_uint((unsigned long)(uintptr_t)v, 16, 0, tmp + 2) + 2;
             break;
         }
+        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
+            double dv = va_arg(args, double);
+            if (dv < 0 || (dv == 0 && 1.0 / dv < 0)) { neg = 1; dv = -dv; }
+            len = _fmt_double(dv, prec < 0 ? 6 : prec, *format, tmp, (int)sizeof(tmp));
+            if (len < 0) len = 0;
+            break;
+        }
         case 'c':
             cval = va_arg(args, int);
             len = 1;
@@ -388,18 +576,64 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
             continue;
         }
 
+        /* точность: максимум символов у строк, минимум цифр у чисел */
+        if (*format == 's') {
+            if (prec >= 0 && len > prec) len = prec;
+        } else if (prec >= 0 && (*format == 'd' || *format == 'u' ||
+                                 *format == 'o' || *format == 'x' ||
+                                 *format == 'X')) {
+            zero = 0;                          /* у целых точность отменяет 0-флаг */
+            if (prec == 0 && len == 1 && tmp[0] == '0') {
+                len = 0;                       /* %.0d от нуля — ничего (как в C) */
+            } else if (prec > len) {
+                int z = prec - len;
+                if (z > (int)sizeof(tmp) - 2) z = (int)sizeof(tmp) - 2;
+                for (int i = len - 1; i >= 0; i--) tmp[i + z] = tmp[i];
+                for (int i = 0; i < z; i++) tmp[i] = '0';
+                len += z;
+            }
+        }
+
+        if (*format == 's' || *format == 'c') zero = 0;
+
+        /* # : у %o ведущий ноль — это цифра, у %x/%X — префикс, и только для
+           ненулевого значения (как в C).  Ширина считается вместе с префиксом. */
+        char pfx[3] = {0};
+        int pfx_len = 0;
+        if (hash && *format == 'o' && len >= 0) {
+            int nonzero = 0;
+            for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
+            if (len == 0) { tmp[0] = '0'; len = 1; }
+            else if (nonzero && tmp[0] != '0' && len < (int)sizeof(tmp) - 1) {
+                for (int i = len - 1; i >= 0; i--) tmp[i + 1] = tmp[i];
+                tmp[0] = '0';
+                len++;
+            }
+        } else if (hash && (*format == 'x' || *format == 'X')) {
+            int nonzero = 0;
+            for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
+            if (nonzero) {
+                pfx[0] = '0';
+                pfx[1] = (*format == 'X') ? 'X' : 'x';
+                pfx_len = 2;
+            }
+        }
+
         if (neg) sign_len = 1;
-        int pad = width - (len + sign_len);
+        int pad = width - (len + sign_len + pfx_len);
         if (pad < 0) pad = 0;
 
         if (minus) {
             if (neg) fputc('-', stream);
+            for (int i = 0; i < pfx_len; i++) fputc(pfx[i], stream);
         } else if (zero) {
             if (neg) fputc('-', stream);
+            for (int i = 0; i < pfx_len; i++) fputc(pfx[i], stream);
             for (int i = 0; i < pad; i++) fputc('0', stream);
         } else {
             for (int i = 0; i < pad; i++) fputc(' ', stream);
             if (neg) fputc('-', stream);
+            for (int i = 0; i < pfx_len; i++) fputc(pfx[i], stream);
         }
 
         if (*format == 'c') {
@@ -448,12 +682,28 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
         if (*format != '%') { _buf_putc(pp, pos, size, *format); continue; }
 
         format++;
-        int zero = 0, minus = 0, width = 0, islong = 0, isll = 0;
-        if (*format == '0') { zero = 1; format++; }
-        if (*format == '-') { minus = 1; format++; }
+        int zero = 0, minus = 0, hash = 0, width = 0, prec = -1, islong = 0, isll = 0;
+        for (;;) {
+            if (*format == '0') { zero = 1; format++; }
+            else if (*format == '-') { minus = 1; format++; }
+            else if (*format == '#') { hash = 1; format++; }
+            else break;
+        }
         while (*format >= '0' && *format <= '9') {
             width = width * 10 + (*format - '0');
             format++;
+        }
+        if (*format == '.') {
+            format++;
+            if (*format == '*') { prec = va_arg(args, int); format++; }
+            else {
+                prec = 0;
+                while (*format >= '0' && *format <= '9') {
+                    prec = prec * 10 + (*format - '0');
+                    format++;
+                }
+            }
+            if (prec < 0) prec = -1;
         }
         {
             int nl = 0;
@@ -516,6 +766,13 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
             len = _fmt_uint((unsigned long)(uintptr_t)v, 16, 0, tmp + 2) + 2;
             break;
         }
+        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
+            double dv = va_arg(args, double);
+            if (dv < 0 || (dv == 0 && 1.0 / dv < 0)) { neg = 1; dv = -dv; }
+            len = _fmt_double(dv, prec < 0 ? 6 : prec, *format, tmp, (int)sizeof(tmp));
+            if (len < 0) len = 0;
+            break;
+        }
         case 'c':
             cval = va_arg(args, int);
             len = 1;
@@ -534,18 +791,64 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
             continue;
         }
 
+        /* точность: максимум символов у строк, минимум цифр у чисел */
+        if (*format == 's') {
+            if (prec >= 0 && len > prec) len = prec;
+        } else if (prec >= 0 && (*format == 'd' || *format == 'u' ||
+                                 *format == 'o' || *format == 'x' ||
+                                 *format == 'X')) {
+            zero = 0;                          /* у целых точность отменяет 0-флаг */
+            if (prec == 0 && len == 1 && tmp[0] == '0') {
+                len = 0;                       /* %.0d от нуля — ничего (как в C) */
+            } else if (prec > len) {
+                int z = prec - len;
+                if (z > (int)sizeof(tmp) - 2) z = (int)sizeof(tmp) - 2;
+                for (int i = len - 1; i >= 0; i--) tmp[i + z] = tmp[i];
+                for (int i = 0; i < z; i++) tmp[i] = '0';
+                len += z;
+            }
+        }
+
+        if (*format == 's' || *format == 'c') zero = 0;
+
+        /* # : у %o ведущий ноль — это цифра, у %x/%X — префикс, и только для
+           ненулевого значения (как в C).  Ширина считается вместе с префиксом. */
+        char pfx[3] = {0};
+        int pfx_len = 0;
+        if (hash && *format == 'o' && len >= 0) {
+            int nonzero = 0;
+            for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
+            if (len == 0) { tmp[0] = '0'; len = 1; }
+            else if (nonzero && tmp[0] != '0' && len < (int)sizeof(tmp) - 1) {
+                for (int i = len - 1; i >= 0; i--) tmp[i + 1] = tmp[i];
+                tmp[0] = '0';
+                len++;
+            }
+        } else if (hash && (*format == 'x' || *format == 'X')) {
+            int nonzero = 0;
+            for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
+            if (nonzero) {
+                pfx[0] = '0';
+                pfx[1] = (*format == 'X') ? 'X' : 'x';
+                pfx_len = 2;
+            }
+        }
+
         if (neg) sign_len = 1;
-        int pad = width - (len + sign_len);
+        int pad = width - (len + sign_len + pfx_len);
         if (pad < 0) pad = 0;
 
         if (minus) {
             if (neg) _buf_putc(pp, pos, size, '-');
+            for (int i = 0; i < pfx_len; i++) _buf_putc(pp, pos, size, pfx[i]);
         } else if (zero) {
             if (neg) _buf_putc(pp, pos, size, '-');
+            for (int i = 0; i < pfx_len; i++) _buf_putc(pp, pos, size, pfx[i]);
             while (pad-- > 0) _buf_putc(pp, pos, size, '0');
         } else {
             while (pad-- > 0) _buf_putc(pp, pos, size, ' ');
             if (neg) _buf_putc(pp, pos, size, '-');
+            for (int i = 0; i < pfx_len; i++) _buf_putc(pp, pos, size, pfx[i]);
         }
 
         if (*format == 'c') {
