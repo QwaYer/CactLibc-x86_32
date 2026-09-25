@@ -4,10 +4,10 @@
 #include <stdint.h>
 
 /*
- * Минимальный syscall ABI (15 номеров). Номера и порядок должны совпадать с:
+ * Minimal syscall ABI (15 numbers). The numbers and their order must match:
  *   CactKernel-x86_32/Cact/kernel/core/syscalls/syscalls.h
- * (syscall_num_t / SYSCALL_COUNT). Всё остальное — через VFS-узлы: см.
- * ioctl_abi.h и relay-слой в src/nodeio.c.
+ * (syscall_num_t / SYSCALL_COUNT). Everything else goes through VFS nodes: see
+ * ioctl_abi.h and the relay layer in src/nodeio.c.
  */
 
 #define SYS_OPEN      0

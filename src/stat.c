@@ -7,7 +7,7 @@
 int stat(const char *path, struct stat *buf) {
     if (!path) { errno = ENOENT; return -1; }
 
-    /* "/" напрямую */
+    /* "/" directly */
     if (path[0] == '/' && path[1] == '\0') {
         int fd = nio_open("/", O_RDONLY);
         if (fd < 0) return -1;
@@ -16,7 +16,7 @@ int stat(const char *path, struct stat *buf) {
         return nio_map(r);
     }
 
-    /* срезать хвостовые '/' (кроме корня) */
+    /* strip trailing '/' (except the root) */
     char pbuf[512];
     size_t i = 0;
     while (path[i] && i < sizeof(pbuf) - 1) { pbuf[i] = path[i]; i++; }
@@ -28,7 +28,7 @@ int stat(const char *path, struct stat *buf) {
     if (fd < 0) return -1;
     cact_statat_arg_t a;
     a.name = base;
-    a.buf  = (cact_stat_t *)buf;   /* layout совпадает: ino/mode/size/type */
+    a.buf  = (cact_stat_t *)buf;   /* layout matches: ino/mode/size/type */
     int r = nio_ioctl(fd, CACT_DIRCTL_STAT, &a);
     nio_close(fd);
     return nio_map(r);

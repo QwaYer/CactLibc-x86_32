@@ -4,7 +4,7 @@
 #include "errno.h"
 #include <stdint.h>
 
-/* Индексы/маски сигналов — в представлении ядра (бит = индекс). */
+/* Signal indices/masks — in the kernel representation (bit = index). */
 
 static int sig_number_to_sigindex(int signum) {
     unsigned u = (unsigned)signum;
@@ -16,7 +16,7 @@ static int sig_number_to_sigindex(int signum) {
             bit++;
         }
         if (bit >= 1 && bit < KERNEL_NSIG) return bit;
-        return -1;   /* SIGKILL (bit 0) обрабатывается как принудительный kill */
+        return -1;   /* SIGKILL (bit 0) is handled as a forced kill */
     }
     switch (signum) {
     case 1:  return 10;
@@ -153,7 +153,7 @@ sighandler_t signal(int signum, sighandler_t handler) {
 
 int kill(pid_t pid, int sig) {
     int idx = sig_number_to_sigindex(sig);
-    if (idx < 0) idx = 0;   /* SIGKILL / немаршрутизируемый → task_kill */
+    if (idx < 0) idx = 0;   /* SIGKILL / unroutable → task_kill */
     cact_signal_arg_t a;
     a.pid    = (uint32_t)pid;
     a.signum = (uint32_t)idx;

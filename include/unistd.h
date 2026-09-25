@@ -31,7 +31,7 @@ typedef unsigned dev_t;
 #define RB_POWER_OFF 0x4321FEDC
 #define RB_SUSPEND   0x53555350
 
-/* ── жизненный цикл процесса ── */
+/* ── process lifecycle ── */
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
 int     close(int fd);
@@ -44,14 +44,14 @@ pid_t   waitpid(pid_t pid, int *status, int options);
 unsigned int sleep(unsigned int seconds);
 int     usleep(unsigned int usec);
 
-/* ── группы и сессии ── */
+/* ── groups and sessions ── */
 pid_t   setsid(void);
 int     setpgid(pid_t pid, pid_t pgid);
 pid_t   getpgid(pid_t pid);
 pid_t   getpgrp(void);
 pid_t   getsid(pid_t pid);
 
-/* ── файловые дескрипторы ── */
+/* ── file descriptors ── */
 off_t   lseek(int fd, off_t offset, int whence);
 ssize_t pread(int fd, void *buf, size_t count, off_t offset);
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
@@ -63,11 +63,11 @@ int     dup3(int oldfd, int newfd, int flags);
 int     pipe(int pipefd[2]);
 int     pipe2(int pipefd[2], int flags);
 
-/* ── память ── */
+/* ── memory ── */
 void   *sbrk(int increment);
 int     brk(void *addr);
 
-/* ── файловая система ── */
+/* ── file system ── */
 char   *getcwd(char *buf, int size);
 int     chdir(const char *path);
 int     chroot(const char *path);
@@ -87,13 +87,13 @@ int     symlink(const char *target, const char *linkpath);
 ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 int     link(const char *oldpath, const char *newpath);
 
-/* ── системные операции ── */
+/* ── system operations ── */
 int     mount(const char *src, const char *target, const char *fstype,
               unsigned long flags, const void *data);
 int     umount(const char *target);
 int     reboot(int cmd);
 
-/* ── загрузка PCI-модулей ядра (только euid 0) ── */
+/* ── kernel PCI module loading (euid 0 only) ── */
 /* vendor_id & device_id both (unsigned)-1: kernel reads cact_pci_* from the module ELF */
 extern char **environ;
 
@@ -112,7 +112,7 @@ struct utsname {
 };
 int uname(struct utsname *buf);
 
-/* ── идентификация ── */
+/* ── identification ── */
 uid_t   getuid(void);
 uid_t   geteuid(void);
 gid_t   getgid(void);

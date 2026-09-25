@@ -16,7 +16,7 @@ int fcntl(int fd, int cmd, ...) {
     va_end(ap);
 
     if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
-        /* F_DUPFD: дублировать начиная со слота >= arg */
+        /* F_DUPFD: duplicate starting from slot >= arg */
         cact_fcntl_arg_t a;
         a.cmd = CACT_F_DUPFD;
         a.arg = (uint32_t)arg;

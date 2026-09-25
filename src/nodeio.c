@@ -83,22 +83,22 @@ int nio_open_parent(const char *path, char *base, size_t base_max) {
         return -1;
     }
 
-    /* найти последний '/' */
+    /* find the last '/' */
     const char *slash = 0;
     for (const char *s = path; *s; s++)
         if (*s == '/') slash = s;
 
     if (!slash) {
-        /* один компонент относительно cwd: открываем "." */
+        /* single component relative to cwd: open "." */
         size_t n = 0;
         while (path[n] && n + 1 < base_max) { base[n] = path[n]; n++; }
         base[n] = '\0';
         return nio_open(".", O_RDONLY);
     }
 
-    /* имя базы — всё после последнего '/' */
+    /* base name — everything after the last '/' */
     const char *b = slash + 1;
-    if (!b[0]) {           /* trailing slash — базы нет */
+    if (!b[0]) {           /* trailing slash — no base */
         errno = EINVAL;
         return -1;
     }
@@ -106,7 +106,7 @@ int nio_open_parent(const char *path, char *base, size_t base_max) {
     while (b[n] && n + 1 < base_max) { base[n] = b[n]; n++; }
     base[n] = '\0';
 
-    /* каталог — всё до последнего '/' (включая его) */
+    /* directory — everything up to the last '/' (inclusive) */
     size_t dlen = (size_t)(slash - path) + 1;
     char  dirbuf[512];
     if (dlen >= sizeof(dirbuf)) {

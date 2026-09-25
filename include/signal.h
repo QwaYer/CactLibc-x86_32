@@ -97,7 +97,7 @@ int sigaddset(sigset_t *set, int signum);
 int sigdelset(sigset_t *set, int signum);
 int sigismember(const sigset_t *set, int signum);
 
-/* Индекс в таблице обработчиков ядра (тот же номер бита маски для доставленных сигналов). */
+/* Index in the kernel handler table (same mask bit number for delivered signals). */
 #define KERNEL_NSIG 13
 
 struct sigaction {

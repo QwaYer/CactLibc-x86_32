@@ -4,16 +4,16 @@
 #include "errno.h"
 #include <stdint.h>
 
-/* Монотонное время с загрузки (см. /proc/time в ядре). */
+/* Monotonic time since boot (see /proc/time in the kernel). */
 
 static int _read_time(cact_time_t *t) {
     int r = nio_read_file("/proc/time", t, sizeof(*t));
     return (r == (int)sizeof(*t)) ? 0 : -1;
 }
 
-/* Гражданское время с RTC (см. /proc/wallclock в ядре).  На ядре без
- * /proc/wallclock откатываемся к монотонному времени — хуже, чем раньше, не
- * становится. */
+/* Civil time from the RTC (see /proc/wallclock in the kernel).  On a kernel
+ * without /proc/wallclock we fall back to monotonic time — no worse than
+ * before. */
 static int _read_wallclock(cact_time_t *t) {
     int r = nio_read_file("/proc/wallclock", t, sizeof(*t));
     if (r == (int)sizeof(*t)) return 0;
@@ -51,7 +51,7 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
     unsigned int ms = (unsigned int)(req->tv_sec * 1000) +
                       (unsigned int)((req->tv_nsec + 999999) / 1000000);
     if (ms == 0) ms = 1;
-    __syscall3(SYS_POLL, 0, 0, ms);   /* poll(NULL,0,ms) — блокирующий sleep */
+    __syscall3(SYS_POLL, 0, 0, ms);   /* poll(NULL,0,ms) — blocking sleep */
     if (rem) { rem->tv_sec = 0; rem->tv_nsec = 0; }
     return 0;
 }

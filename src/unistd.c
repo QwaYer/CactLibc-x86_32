@@ -9,7 +9,7 @@
 #include "uio.h"
 #include <stdint.h>
 
-/* ── жизненный цикл процесса (core traps) ── */
+/* ── process lifecycle (core traps) ── */
 
 ssize_t read(int fd, void *buf, size_t count) {
     return (ssize_t)syscall(SYS_READ, (uintptr_t)fd, (uintptr_t)buf, (uintptr_t)count);
@@ -54,7 +54,7 @@ int usleep(unsigned int usec) {
     return 0;
 }
 
-/* ── идентификация через /proc/self/info ── */
+/* ── identification via /proc/self/info ── */
 
 static int _self_field(uint32_t which, uint32_t *out) {
     cact_proc_info_t info;
@@ -145,7 +145,7 @@ pid_t getsid(pid_t pid) {
     return (pid_t)info.sid;
 }
 
-/* ── сессии / контроль через /proc/self/ctl ── */
+/* ── sessions / control via /proc/self/ctl ── */
 
 pid_t setsid(void) {
     return (pid_t)nio_map(nio_ctl(CACT_PROCCTL_SETSID, 0));
@@ -178,7 +178,7 @@ int chroot(const char *path) {
     return nio_map(nio_ctl(CACT_PROCCTL_CHROOT, (void *)path));
 }
 
-/* ── fd-level операции через FDCTL_* ── */
+/* ── fd-level operations via FDCTL_* ── */
 
 off_t lseek(int fd, off_t offset, int whence) {
     cact_lseek_arg_t a;
@@ -282,7 +282,7 @@ int select(int nfds, fd_set *readfds, fd_set *writefds,
     return count;
 }
 
-/* ── память (core traps) ── */
+/* ── memory (core traps) ── */
 
 void *sbrk(int increment) {
     uintptr_t cur = (uintptr_t)syscall(SYS_BRK, 0, 0, 0);
@@ -300,7 +300,7 @@ int brk(void *addr) {
     return (ret == UINTPTR_MAX) ? -1 : 0;
 }
 
-/* ── файловая система: DIRCTL_* по открытому каталогу ── */
+/* ── file system: DIRCTL_* on an open directory ── */
 
 char *getcwd(char *buf, int size) {
     char tmp[512];
@@ -476,14 +476,14 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
 }
 
 int link(const char *oldpath, const char *newpath) {
-    /* DIRCTL hard-link работает в пределах одного каталога */
+    /* DIRCTL hard-link works within a single directory */
     char obase[128], nbase[128];
     int  fd = nio_open_parent(oldpath, obase, sizeof(obase));
     if (fd < 0) return -1;
     cact_link_arg_t a;
     a.target  = obase;
     a.newname = nbase;
-    /* имя нового файла берём из newpath */
+    /* take the new file name from newpath */
     const char *slash = 0;
     for (const char *s = newpath; *s; s++)
         if (*s == '/') slash = s;
@@ -497,7 +497,7 @@ int link(const char *oldpath, const char *newpath) {
     return nio_map(r);
 }
 
-/* ── системные операции через /dev/sys ── */
+/* ── system operations via /dev/sys ── */
 
 int mount(const char *src, const char *target, const char *fstype,
           unsigned long flags, const void *data) {

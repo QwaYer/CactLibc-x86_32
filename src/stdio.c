@@ -40,7 +40,7 @@ int puts(const char *str) {
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    /* DIRCTL rename работает внутри одного открытого каталога */
+    /* DIRCTL rename works within a single open directory */
     char obase[128];
     int  fd = nio_open_parent(oldpath, obase, sizeof(obase));
     if (fd < 0) return -1;
@@ -283,7 +283,7 @@ static int _fmt_u64(unsigned long long v, unsigned int base, int upper, char *ou
         return n;
     }
 
-    /* base 10: 64/32-битное деление на unsigned int — одна divl, без libgcc */
+    /* base 10: 64/32-bit division by unsigned int — a single divl, no libgcc */
     char rev[40];
     int n = 0;
     unsigned int d = 10u;
@@ -314,9 +314,9 @@ static double _pow10_i(int n) {
     return r;
 }
 
-/* То же в long double: 64-битная мантисса хранит 10^prec и произведение на
-   дробную часть точно до 18 знаков, поэтому округление совпадает с точной
-   десятичной печатью, а не с накопленной ошибкой double. */
+/* Same in long double: the 64-bit mantissa holds 10^prec and the product with
+   the fractional part exactly up to 18 digits, so rounding matches exact
+   decimal printing rather than the accumulated error of double. */
 static long double _pow10_ld(int n) {
     long double r = 1.0L;
     while (n-- > 0) r *= 10.0L;
@@ -339,18 +339,18 @@ static int _u64_digits(unsigned long long v, char *out) {
 static int _fmt_fixed(double v, int prec, char *out, int cap) {
     int n = 0;
     if (prec > _FMT_MAXPREC) prec = _FMT_MAXPREC;
-    if (v >= 1.0e18) return -1;                 /* не влезает: caller уйдёт в %e */
+    if (v >= 1.0e18) return -1;                 /* does not fit: caller will fall back to %e */
     unsigned long long ip = (unsigned long long)v;
     double fr = v - (double)ip;
     unsigned long long scale = (unsigned long long)_pow10_i(prec);
     long double scaled = (long double)fr * _pow10_ld(prec);
     unsigned long long fd = (unsigned long long)scaled;
     long double rem = scaled - (long double)fd;
-    /* округление как в C: половина — к чётному (при prec==0 округляется
-       последняя цифра целой части, а не дробной) */
+    /* rounding as in C: half to even (with prec==0 the last digit of the
+       integer part is rounded, not the fractional part) */
     unsigned long long last = (prec == 0) ? (ip & 1ULL) : (fd & 1ULL);
     if (rem > 0.5 || (rem == 0.5 && last)) fd += 1;
-    if (fd >= scale) { fd -= scale; ip += 1; }  /* округление перенеслось в целую часть */
+    if (fd >= scale) { fd -= scale; ip += 1; }  /* the rounding carried over into the integer part */
 
     char dig[24];
     int dn = _u64_digits(ip, dig);
@@ -360,7 +360,7 @@ static int _fmt_fixed(double v, int prec, char *out, int cap) {
         char fdg[24];
         int fn = _u64_digits(fd, fdg);
         if (n < cap - 1) out[n++] = '.';
-        for (int i = fn; i < prec && n < cap - 1; i++) out[n++] = '0';   /* ведущие нули дроби */
+        for (int i = fn; i < prec && n < cap - 1; i++) out[n++] = '0';   /* leading zeros of the fraction */
         for (int i = 0; i < fn && n < cap - 1; i++) out[n++] = fdg[i];
     }
     out[n] = '\0';
@@ -380,16 +380,16 @@ static int _fmt_sci(double v, int prec, int upper, char *out, int cap) {
     long double scaled = (long double)a * _pow10_ld(prec);
     unsigned long long m = (unsigned long long)scaled;
     long double rem = scaled - (long double)m;
-    if (rem > 0.5 || (rem == 0.5 && (m & 1ULL))) m += 1;   /* половина — к чётному */
+    if (rem > 0.5 || (rem == 0.5 && (m & 1ULL))) m += 1;   /* half to even */
     if (m >= full * 10ULL) { m /= 10ULL; exp++; }        /* 9.99… -> 1.0e+1 */
 
     char dig[24];
     int dn = _u64_digits(m, dig);
     int n = 0;
-    for (int i = dn; i < prec + 1; i++) { if (n < cap - 1) out[n++] = '0'; }  /* выровнять мантиссу */
+    for (int i = dn; i < prec + 1; i++) { if (n < cap - 1) out[n++] = '0'; }  /* align the mantissa */
     for (int i = 0; i < dn && n < cap - 1; i++) out[n++] = dig[i];
     if (prec > 0 && n < cap - 1) {
-        /* точка после первой цифры: сдвигаем хвост */
+        /* point after the first digit: shift the tail */
         for (int i = n; i > 1; i--) out[i] = out[i - 1];
         out[1] = '.';
         n++;
@@ -405,7 +405,7 @@ static int _fmt_sci(double v, int prec, int upper, char *out, int cap) {
     return n;
 }
 
-/* Убрать хвостовые нули (и точку) — нужно %g. */
+/* Remove trailing zeros (and the point) — needed by %g. */
 static void _strip_zeros(char *s, int *len) {
     int n = *len, i = 0;
     while (i < n && s[i] != '.' && s[i] != 'e' && s[i] != 'E') i++;
@@ -414,12 +414,12 @@ static void _strip_zeros(char *s, int *len) {
     while (end < n && s[end] >= '0' && s[end] <= '9') end++;
     int j = end;
     while (j > i + 1 && s[j - 1] == '0') j--;
-    if (j == i + 1) j = i;                       /* точка без дроби — убрать и её */
+    if (j == i + 1) j = i;                       /* point with no fraction — remove it too */
     for (int k = j; k < n - (end - j); k++) s[k] = s[k + (end - j)];
     *len = n - (end - j);
 }
 
-/* %f/%e/%g (и верхний регистр).  Знак обрабатывает вызывающий. */
+/* %f/%e/%g (and uppercase).  The caller handles the sign. */
 static int _fmt_double(double v, int prec, int conv, char *out, int cap) {
     int upper = (conv >= 'A' && conv <= 'Z');
     char mode  = (conv == 'e' || conv == 'E') ? 'e'
@@ -433,7 +433,7 @@ static int _fmt_double(double v, int prec, int conv, char *out, int cap) {
         out[n] = '\0';
         return n;
     }
-    if (v > 1.7976931348623157e308) {            /* +/- inf, знак у вызывающего */
+    if (v > 1.7976931348623157e308) {            /* +/- inf, sign handled by the caller */
         const char *s = upper ? "INF" : "inf";
         n = 0;
         while (*s && n < cap - 1) out[n++] = *s++;
@@ -443,7 +443,7 @@ static int _fmt_double(double v, int prec, int conv, char *out, int cap) {
 
     if (mode == 'g') {
         if (prec == 0) prec = 1;
-        /* порядок числа решает, какая форма короче (правило C) */
+        /* the exponent decides which form is shorter (C rule) */
         int exp = 0;
         double a = v;
         if (a != 0.0) {
@@ -576,15 +576,15 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
             continue;
         }
 
-        /* точность: максимум символов у строк, минимум цифр у чисел */
+        /* precision: max characters for strings, min digits for numbers */
         if (*format == 's') {
             if (prec >= 0 && len > prec) len = prec;
         } else if (prec >= 0 && (*format == 'd' || *format == 'u' ||
                                  *format == 'o' || *format == 'x' ||
                                  *format == 'X')) {
-            zero = 0;                          /* у целых точность отменяет 0-флаг */
+            zero = 0;                          /* for integers precision cancels the 0 flag */
             if (prec == 0 && len == 1 && tmp[0] == '0') {
-                len = 0;                       /* %.0d от нуля — ничего (как в C) */
+                len = 0;                       /* %.0d of zero — nothing (as in C) */
             } else if (prec > len) {
                 int z = prec - len;
                 if (z > (int)sizeof(tmp) - 2) z = (int)sizeof(tmp) - 2;
@@ -596,8 +596,8 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
 
         if (*format == 's' || *format == 'c') zero = 0;
 
-        /* # : у %o ведущий ноль — это цифра, у %x/%X — префикс, и только для
-           ненулевого значения (как в C).  Ширина считается вместе с префиксом. */
+        /* # : for %o the leading zero is a digit, for %x/%X it is a prefix, and only
+           for a nonzero value (as in C).  Width is counted together with the prefix. */
         char pfx[3] = {0};
         int pfx_len = 0;
         if (hash && *format == 'o' && len >= 0) {
@@ -791,15 +791,15 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
             continue;
         }
 
-        /* точность: максимум символов у строк, минимум цифр у чисел */
+        /* precision: max characters for strings, min digits for numbers */
         if (*format == 's') {
             if (prec >= 0 && len > prec) len = prec;
         } else if (prec >= 0 && (*format == 'd' || *format == 'u' ||
                                  *format == 'o' || *format == 'x' ||
                                  *format == 'X')) {
-            zero = 0;                          /* у целых точность отменяет 0-флаг */
+            zero = 0;                          /* for integers precision cancels the 0 flag */
             if (prec == 0 && len == 1 && tmp[0] == '0') {
-                len = 0;                       /* %.0d от нуля — ничего (как в C) */
+                len = 0;                       /* %.0d of zero — nothing (as in C) */
             } else if (prec > len) {
                 int z = prec - len;
                 if (z > (int)sizeof(tmp) - 2) z = (int)sizeof(tmp) - 2;
@@ -811,8 +811,8 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
 
         if (*format == 's' || *format == 'c') zero = 0;
 
-        /* # : у %o ведущий ноль — это цифра, у %x/%X — префикс, и только для
-           ненулевого значения (как в C).  Ширина считается вместе с префиксом. */
+        /* # : for %o the leading zero is a digit, for %x/%X it is a prefix, and only
+           for a nonzero value (as in C).  Width is counted together with the prefix. */
         char pfx[3] = {0};
         int pfx_len = 0;
         if (hash && *format == 'o' && len >= 0) {
