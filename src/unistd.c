@@ -37,8 +37,8 @@ void _exit(int status) {
 }
 
 pid_t waitpid(pid_t pid, int *status, int options) {
-    (void)options;
-    return (pid_t)syscall(SYS_WAITPID, (uintptr_t)pid, (uintptr_t)status, 0);
+    return (pid_t)syscall(SYS_WAITPID, (uintptr_t)pid, (uintptr_t)status,
+                          (uintptr_t)options);
 }
 
 /* sleep: poll(NULL, 0, ms) — poll is the core ready/timeout primitive. */

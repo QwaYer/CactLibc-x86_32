@@ -11,11 +11,20 @@ static int _read_time(cact_time_t *t) {
     return (r == (int)sizeof(*t)) ? 0 : -1;
 }
 
+/* Гражданское время с RTC (см. /proc/wallclock в ядре).  На ядре без
+ * /proc/wallclock откатываемся к монотонному времени — хуже, чем раньше, не
+ * становится. */
+static int _read_wallclock(cact_time_t *t) {
+    int r = nio_read_file("/proc/wallclock", t, sizeof(*t));
+    if (r == (int)sizeof(*t)) return 0;
+    return _read_time(t);
+}
+
 int gettimeofday(struct timeval *tv, void *tz) {
     (void)tz;
     if (!tv) return 0;
     cact_time_t t;
-    if (_read_time(&t) < 0) return -1;
+    if (_read_wallclock(&t) < 0) return -1;
     tv->tv_sec  = (long)t.sec;
     tv->tv_usec = (long)t.usec;
     return 0;
@@ -27,7 +36,8 @@ int clock_gettime(int clkid, struct timespec *tp) {
         return -1;
     }
     cact_time_t t;
-    if (_read_time(&t) < 0) return -1;
+    int r = (clkid == CLOCK_MONOTONIC) ? _read_time(&t) : _read_wallclock(&t);
+    if (r < 0) return -1;
     tp->tv_sec  = (long)t.sec;
     tp->tv_nsec = (long)t.usec * 1000;
     return 0;
