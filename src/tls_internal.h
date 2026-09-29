@@ -13,9 +13,9 @@
 long cact_tls_load_roots(const char *path, unsigned char **out, size_t *out_len);
 
 /* Try the system bundle locations in order: the override from the
- * CACT_CA_BUNDLE environment variable, /etc/ca-certificates.crt, then
- * /lib/ca-certificates.crt (the copy the image ships).  Returns DER bytes or
- * -1 when no usable bundle was found. */
+ * CACT_CA_BUNDLE environment variable, /etc/ssl/certs/ca-certificates.crt,
+ * /etc/ca-certificates.crt, then /usr/share/ca-certificates.crt (the copy the
+ * image ships).  Returns DER bytes or -1 when no usable bundle was found. */
 long cact_tls_load_default_roots(unsigned char **out, size_t *out_len);
 
 #endif /* CACT_TLS_INTERNAL_H */

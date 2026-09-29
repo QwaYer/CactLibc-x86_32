@@ -39,6 +39,7 @@ libc_c_sources = files(
   'udivdi3.c',
   'unistd.c',
   'wait.c',
+  'wlan.c',
 )
 
 libc_asm_sources = files('setjmp.S')

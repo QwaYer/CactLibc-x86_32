@@ -14,8 +14,9 @@
 #define ROOTS_MAX_BYTES (4u * 1024u * 1024u)
 
 static const char *image_paths[] = {
+    "/etc/ssl/certs/ca-certificates.crt",
     "/etc/ca-certificates.crt",
-    "/lib/ca-certificates.crt",
+    "/usr/share/ca-certificates.crt",
 };
 
 /* Read a whole file into a malloc'd buffer. */

@@ -954,8 +954,8 @@ static int ensure_roots(void) {
     if (cact_tls_load_default_roots(&roots_der, &roots_len) <= 0) {
         roots_der = NULL;
         roots_len = 0;
-        err_set("no CA bundle: looked for /etc/ca-certificates.crt and "
-                "/lib/ca-certificates.crt");
+        err_set("no CA bundle: looked for /etc/ssl/certs/ca-certificates.crt, "
+                "/etc/ca-certificates.crt and /usr/share/ca-certificates.crt");
         return -1;
     }
     return 0;

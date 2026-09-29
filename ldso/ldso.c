@@ -399,9 +399,9 @@ static int load_library(const char* name)
     if (g_nobj >= LDSO_MAX_OBJS) return -1;
 
     len = ld_strlen(name);
-    if (len + 6 > SO_PATH_MAX) return -1;
-    ld_memcpy(path, "/lib/", 5);
-    ld_memcpy(path + 5, name, (u32)len + 1);
+    if (len + 10 > SO_PATH_MAX) return -1;
+    ld_memcpy(path, "/usr/lib/", 9);
+    ld_memcpy(path + 9, name, (u32)len + 1);
 
     cap = LDSO_SCRATCH;
     buf = (u8*)ldso_sc(SYS_MMAP, (unsigned)&(u32[]){0, cap,

@@ -85,7 +85,7 @@ int system(const char *command) {
     if (pid < 0) return -1;
     if (pid == 0) {
         char *argv[] = { "cactsole", "-c", (char *)command, 0 };
-        execve("/bin/cactsole", argv, environ);
+        execve("/usr/bin/cactsole", argv, environ);
         _exit(127);
     }
     int status = 0;

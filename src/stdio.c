@@ -905,7 +905,7 @@ static pid_t _pop_pid[POPEN_MAX];
 FILE *popen(const char *command, const char *type) {
     if (!command || !type || (type[0] != 'r' && type[0] != 'w') || type[1] == '+')
         return 0;
-    if (access("/bin/cactsole", X_OK) != 0) {
+    if (access("/usr/bin/cactsole", X_OK) != 0) {
         errno = ENOENT;
         return 0;
     }
@@ -921,7 +921,7 @@ FILE *popen(const char *command, const char *type) {
         close(fds[0]);
         close(fds[1]);
         char *argv[] = { "cactsole", "-c", (char *)command, 0 };
-        execve("/bin/cactsole", argv, environ);
+        execve("/usr/bin/cactsole", argv, environ);
         _exit(127);
     }
 
