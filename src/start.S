@@ -9,24 +9,36 @@ _start:
     popl    %ebx
     addl    $(_GLOBAL_OFFSET_TABLE_ - 1b), %ebx
 
-    /* Seed `environ` from the exec-provided envp array before main(). */
-    movl    8(%esp), %eax       /* envp */
+    /* The kernel (and, for a PT_INTERP image, ld.so handing back the original
+     * stack) leaves esp wherever the argv/envp string copies ended, which is
+     * not 16-byte aligned.  clang may emit `movaps` into aligned stack slots,
+     * so establish the i386 ABI guarantee — esp ≡ 0 (mod 16) right before a
+     * `call` — here.  ebp keeps the original pointer to argc/argv/envp. */
+    movl    %esp, %ebp
+    andl    $-16, %esp
+
+    /* Seed `environ` from the exec-provided envp array before main().  12 bytes
+     * of padding + the pushed arg keep the call 16-byte aligned. */
+    movl    8(%ebp), %eax       /* envp */
     testl   %eax, %eax
     jz      2f
+    subl    $12, %esp
     pushl   %eax
     call    __cact_init_env@PLT
-    addl    $4, %esp
+    addl    $16, %esp
 2:
-    movl (%esp),  %eax       /* argc */
-    movl 4(%esp), %ecx       /* argv */
-    movl 8(%esp), %edx       /* envp */
-    pushl %edx
-    pushl %ecx
-    pushl %eax
-    call main@PLT
-    addl $12, %esp
-    pushl %eax
-    call exit@PLT
+    movl    (%ebp),  %eax       /* argc */
+    movl    4(%ebp), %ecx       /* argv */
+    movl    8(%ebp), %edx       /* envp */
+    subl    $4, %esp            /* 4 bytes of padding + 3 args = 16 */
+    pushl   %edx
+    pushl   %ecx
+    pushl   %eax
+    call    main@PLT
+    addl    $16, %esp
+    subl    $12, %esp           /* 12 bytes of padding + the pushed arg = 16 */
+    pushl   %eax
+    call    exit@PLT
     hlt
 
 .section .note.GNU-stack,"",@progbits
