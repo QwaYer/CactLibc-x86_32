@@ -108,6 +108,21 @@ struct block_header {
 static struct block_header *free_list = 0;
 static int heap_initialized = 0;
 
+/* The free list is process-wide, so malloc/free must be serialised once
+ * threads exist.  A spinlock is enough: the critical sections are short and
+ * the holder is preempted by the scheduler, so a spinner always makes progress. */
+static volatile int malloc_lock = 0;
+
+static void malloc_lock_acquire(void) {
+    while (__atomic_exchange_n(&malloc_lock, 1, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&malloc_lock, __ATOMIC_RELAXED))
+            ;
+}
+
+static void malloc_lock_release(void) {
+    __atomic_store_n(&malloc_lock, 0, __ATOMIC_RELEASE);
+}
+
 static void heap_init(void) {
     if (heap_initialized) return;
     heap_initialized = 1;
@@ -175,6 +190,7 @@ static struct block_header *request_space(unsigned int size) {
 
 void *malloc(size_t size) {
     if (size == 0) return 0;
+    malloc_lock_acquire();
     heap_init();
 
     unsigned int aligned = ALIGN8((unsigned int)size);
@@ -192,12 +208,14 @@ void *malloc(size_t size) {
             block->next = remainder;
         }
         block->is_free = 0;
+        malloc_lock_release();
         return (void *)((char *)block + BLOCK_SIZE);
     }
 
     block = request_space(aligned);
-    if (!block) return 0;
+    if (!block) { malloc_lock_release(); return 0; }
     block->is_free = 0;
+    malloc_lock_release();
     return (void *)((char *)block + BLOCK_SIZE);
 }
 
@@ -206,6 +224,8 @@ void free(void *ptr) {
     struct block_header *block = (struct block_header *)
         ((char *)ptr - BLOCK_SIZE);
     if (block->magic != BLOCK_MAGIC) return;
+
+    malloc_lock_acquire();
     block->is_free = 1;
 
     struct block_header *cur = free_list;
@@ -213,10 +233,11 @@ void free(void *ptr) {
         if (cur->is_free && cur->next && cur->next->is_free) {
             cur->size += BLOCK_SIZE + cur->next->size;
             cur->next = cur->next->next;
-            continue; 
+            continue;
         }
         cur = cur->next;
     }
+    malloc_lock_release();
 }
 
 void *calloc(size_t nmemb, size_t size) {

@@ -74,7 +74,25 @@ static int _self_field(uint32_t which, uint32_t *out) {
     return 0;
 }
 
+/* tid: the kernel task id (== pid for the process leader).  getpid() caches the
+ * leader's tid on first use so a threaded process reports the same pid from
+ * every thread — /proc/self/info's `pid` is the calling task's tid. */
+pid_t gettid(void) {
+    uint32_t v = 0;
+    _self_field(0, &v);
+    return (pid_t)v;
+}
+
+static pid_t _cact_pid_cache = 0;
+
+/* Called by pthread_create() while the leader is still the caller, so the pid
+ * cache is seeded from the process leader's tid, not a worker's. */
+void __cact_pid_init(void) {
+    if (!_cact_pid_cache) _cact_pid_cache = gettid();
+}
+
 pid_t getpid(void) {
+    if (_cact_pid_cache) return _cact_pid_cache;
     uint32_t v = 0;
     _self_field(0, &v);
     return (pid_t)v;

@@ -42,7 +42,7 @@ libc_c_sources = files(
   'wlan.c',
 )
 
-libc_asm_sources = files('setjmp.S')
+libc_asm_sources = files('setjmp.S', 'thread_start.S')
 
 # Named 'c' so the archive keeps its historical name: libc.a.  Not part of the
 # default build, just like the Makefile's TARGET_A.

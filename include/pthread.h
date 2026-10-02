@@ -5,26 +5,33 @@
 #include <time.h>
 
 /*
- * Minimal POSIX threads for CactOS.
+ * POSIX threads for CactOS.
  *
- * The Cact kernel has no threads/clone/futex, so every process is
- * single-threaded.  The subset below (mutexes, condition variables, once,
- * TLS keys) satisfies the pthread usage of single-threaded consumers such as
- * libwayland.  pthread_create() is provided but fails with ENOSYS.
+ * The Cact kernel now provides user threads (CACT_PROCCTL_THREAD_CREATE),
+ * futex-style wait/wake (CACT_PROCCTL_FUTEX) and a kernel-cleared join word
+ * (clear_child_tid).  On top of those this header offers the subset libc
+ * consumers need: mutexes, condition variables, once, per-thread keys, and
+ * pthread_create/join/exit.
  */
 
 typedef uint32_t pthread_t;
 
+/* `state` is the futex word: 0 = unlocked, 1 = locked (no waiters),
+ * 2 = locked with at least one waiter. */
 typedef struct {
-    volatile int state;   /* 0 = unlocked, 1 = locked */
+    volatile int state;
+    int          type;
+    int          count;   /* recursion depth (recursive mutexes) */
+    int          owner;   /* owning tid (recursive/errorcheck) */
 } pthread_mutex_t;
 
+/* `seq` is the futex word: bumped by signal/broadcast, waited on by waiters. */
 typedef struct {
-    volatile int seq;     /* unused in single-threaded mode */
+    volatile int seq;
 } pthread_cond_t;
 
 typedef struct {
-    volatile int done;
+    volatile int done;    /* 0 = unstarted, 1 = running, 2 = done */
 } pthread_once_t;
 
 typedef uint32_t pthread_key_t;
@@ -33,17 +40,20 @@ typedef struct { uint32_t __x; } pthread_attr_t;
 typedef struct { uint32_t __x; } pthread_mutexattr_t;
 typedef struct { uint32_t __x; } pthread_condattr_t;
 
-#define PTHREAD_MUTEX_INITIALIZER  { 0 }
+#define PTHREAD_MUTEX_INITIALIZER  { 0, 0, 0, 0 }
 #define PTHREAD_COND_INITIALIZER   { 0 }
 #define PTHREAD_ONCE_INIT          { 0 }
 
-#define PTHREAD_MUTEX_NORMAL    0
-#define PTHREAD_MUTEX_RECURSIVE 1
+#define PTHREAD_MUTEX_NORMAL     0
+#define PTHREAD_MUTEX_RECURSIVE  1
 #define PTHREAD_MUTEX_ERRORCHECK 2
-#define PTHREAD_MUTEX_DEFAULT   PTHREAD_MUTEX_NORMAL
+#define PTHREAD_MUTEX_DEFAULT    PTHREAD_MUTEX_NORMAL
 
 #define PTHREAD_KEYS_MAX 64
 #define PTHREAD_DESTRUCTOR_ITERATIONS 4
+
+#define PTHREAD_CREATE_JOINABLE 0
+#define PTHREAD_CREATE_DETACHED 1
 
 int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
 int pthread_mutex_destroy(pthread_mutex_t *mutex);
@@ -73,7 +83,8 @@ int pthread_attr_init(pthread_attr_t *attr);
 int pthread_attr_destroy(pthread_attr_t *attr);
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg);
-void pthread_exit(void *retval);
+void pthread_exit(void *retval) __attribute__((noreturn));
 int pthread_join(pthread_t thread, void **retval);
+int pthread_detach(pthread_t thread);
 
 #endif /* _PTHREAD_H */
