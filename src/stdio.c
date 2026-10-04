@@ -40,7 +40,6 @@ int puts(const char *str) {
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    /* DIRCTL rename works within a single open directory */
     char obase[128];
     int  fd = nio_open_parent(oldpath, obase, sizeof(obase));
     if (fd < 0) return -1;
@@ -55,10 +54,24 @@ int rename(const char *oldpath, const char *newpath) {
     nbase[n] = '\0';
     if (!nbase[0]) { nio_close(fd); errno = EINVAL; return -1; }
 
-    cact_rename_arg_t a;
+    /* Destination directory: everything before the last slash, or "." if none. */
+    char ndir[512];
+    if (slash) {
+        size_t d = (size_t)(slash - newpath);
+        if (d == 0) d = 1;                     /* "/x" -> "/" */
+        if (d > sizeof(ndir) - 1) d = sizeof(ndir) - 1;
+        for (size_t i = 0; i < d; i++) ndir[i] = newpath[i];
+        ndir[d] = '\0';
+    } else {
+        ndir[0] = '.'; ndir[1] = '\0';
+    }
+
+    /* RENAMEAT handles both same- and cross-directory moves atomically. */
+    cact_renameat_arg_t a;
     a.oldname = obase;
+    a.newdir  = ndir;
     a.newname = nbase;
-    int r = nio_ioctl(fd, CACT_DIRCTL_RENAME, &a);
+    int r = nio_ioctl(fd, CACT_DIRCTL_RENAMEAT, &a);
     nio_close(fd);
     return nio_map(r);
 }

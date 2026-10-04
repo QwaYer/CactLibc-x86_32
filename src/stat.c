@@ -68,3 +68,65 @@ int lstat(const char *path, struct stat *buf) {
      * already that of the link itself. */
     return stat(path, buf);
 }
+
+/* Resolve the filesystem containing `path` via DIRCTL_STATFS. */
+int statfs(const char *path, cact_statfs_t *buf) {
+    if (!path || !buf) { errno = ENOENT; return -1; }
+
+    if (path[0] == '/' && path[1] == '\0') {
+        int fd = nio_open("/", O_RDONLY);
+        if (fd < 0) return -1;
+        cact_statfs_arg_t a;
+        a.name = 0;              /* the directory's own filesystem */
+        a.buf  = buf;
+        int r = nio_ioctl(fd, CACT_DIRCTL_STATFS, &a);
+        nio_close(fd);
+        return nio_map(r);
+    }
+
+    char pbuf[512];
+    size_t i = 0;
+    while (path[i] && i < sizeof(pbuf) - 1) { pbuf[i] = path[i]; i++; }
+    pbuf[i] = '\0';
+    while (i > 1 && pbuf[i - 1] == '/') pbuf[--i] = '\0';
+
+    char base[128];
+    int  fd = nio_open_parent(pbuf, base, sizeof(base));
+    if (fd < 0) return -1;
+    cact_statfs_arg_t a;
+    a.name = base;
+    a.buf  = buf;
+    int r = nio_ioctl(fd, CACT_DIRCTL_STATFS, &a);
+    nio_close(fd);
+    return nio_map(r);
+}
+
+/* Rich stat (statx).  Follows a final symlink unless CACT_AT_SYMLINK_NOFOLLOW. */
+int cact_statx(const char *path, cact_statx_t *buf, uint32_t flags) {
+    if (!path || !buf) { errno = ENOENT; return -1; }
+
+    if (path[0] == '/' && path[1] == '\0') {
+        int fd = nio_open("/", O_RDONLY);
+        if (fd < 0) return -1;
+        int r = nio_ioctl(fd, CACT_FDCTL_FSTATX, buf);
+        nio_close(fd);
+        return nio_map(r);
+    }
+
+    char pbuf[512];
+    size_t i = 0;
+    while (path[i] && i < sizeof(pbuf) - 1) { pbuf[i] = path[i]; i++; }
+    pbuf[i] = '\0';
+    while (i > 1 && pbuf[i - 1] == '/') pbuf[--i] = '\0';
+
+    char base[128];
+    int  fd = nio_open_parent(pbuf, base, sizeof(base));
+    if (fd < 0) return -1;
+    cact_statx_arg_t a;
+    a.name  = base;
+    a.buf   = buf;
+    a.flags = flags;
+    int r = nio_ioctl(fd, CACT_DIRCTL_STATX, &a);
+    nio_close(fd);
+    return nio_map(r);
+}

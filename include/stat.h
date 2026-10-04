@@ -52,4 +52,10 @@ int fstat(int fd, struct stat *buf);
 int chmod(const char *path, int mode);
 int chown(const char *path, int uid, int gid);
 
+#include <ioctl_abi.h>
+// Filesystem statistics for the filesystem containing `path`.
+int statfs(const char *path, cact_statfs_t *buf);
+// Rich stat; `flags` may set CACT_AT_SYMLINK_NOFOLLOW.
+int cact_statx(const char *path, cact_statx_t *buf, uint32_t flags);
+
 #endif
