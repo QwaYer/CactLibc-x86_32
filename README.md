@@ -1,18 +1,18 @@
 # 🌵 CactLib/x86_32
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-green.svg?style=for-the-badge" alt="Version: 1.0.0">
+  <img src="https://img.shields.io/badge/version-2.0.0-green.svg?style=for-the-badge" alt="Version: 2.0.0">
   <img src="https://img.shields.io/badge/license-GPLv3-blue.svg?style=for-the-badge" alt="License: GPLv3">
   <img src="https://img.shields.io/badge/arch-i686-red.svg?style=for-the-badge" alt="Arch: i686">
   <img src="https://img.shields.io/badge/language-C%2FASM-orange.svg?style=for-the-badge" alt="Language: C/ASM">
   <img src="https://img.shields.io/badge/output-clibc.so-green.svg?style=for-the-badge" alt="clibc.so">
-  <img src="https://img.shields.io/badge/syscall-sysenter%20%2B%20int%200x80-purple.svg?style=for-the-badge" alt="sysenter + int 0x80">
-  <img src="https://img.shields.io/badge/status-1.0.0-yellow.svg?style=for-the-badge" alt="1.0.0">
+  <img src="https://img.shields.io/badge/syscall-sysenter-purple.svg?style=for-the-badge" alt="sysenter">
+  <img src="https://img.shields.io/badge/status-2.0.0-yellow.svg?style=for-the-badge" alt="2.0.0">
 </p>
 
 <p align="center">
   A <strong>freestanding C library</strong> for <a href="https://github.com/QwaYer/CactOS-x86_32"><strong>CactOS</strong></a> user space on <strong>i686</strong>.<br>
-  No host libc — every OS entry goes through <code>sysenter</code> (with an <code>int 0x80</code> fallback) using the numbers from <a href="include/syscall.h"><code>include/syscall.h</code></a>, which must match <a href="https://github.com/QwaYer/CactKernel-x86_32"><strong>CactKernel-x86_32</strong></a> <code>syscalls.h</code>; everything beyond the <strong>15</strong> traps is a VFS-node ioctl from <a href="include/ioctl_abi.h"><code>ioctl_abi.h</code></a>.
+  No host libc — every OS entry goes through <code>sysenter</code> using the numbers from <a href="include/syscall.h"><code>include/syscall.h</code></a>, which must match <a href="https://github.com/QwaYer/CactKernel-x86_32"><strong>CactKernel-x86_32</strong></a> <code>syscalls.h</code>; everything beyond the <strong>15</strong> traps is a VFS-node ioctl from <a href="include/ioctl_abi.h"><code>ioctl_abi.h</code></a>.
 </p>
 
 ---
@@ -21,11 +21,11 @@
 
 | | |
 |---|---|
-| **Sources** | 37 × `src/*.c` + `src/start.S`, `src/setjmp.S` |
-| **Public headers** | 60 files under `include/` (including `sys/*.h`) |
+| **Sources** | 38 × `src/*.c` + `src/start.S`, `src/setjmp.S`, `src/thread_start.S` |
+| **Public headers** | 61 files under `include/` (including `sys/*.h`) |
 | **Syscall traps** | **15** (`SYS_SYSCALL_COUNT` mirrors the kernel enum); every other operation is a VFS-node ioctl |
 | **Runtime deps** | None (build-time: `clang -m32`, GNU `binutils`, `meson`, `ninja`) |
-| **Artifacts** | **`clibc.so`** (shared ET_DYN for PIE), **`build-meson/start.o`** (PIC `_start`) |
+| **Artifacts** | **`clibc.so`** (shared ET_DYN for PIE), **`build-meson/ld.so`** (PT_INTERP dynamic linker), **`build-meson/start.o`** (PIC `_start`) |
 
 CactLib is the **contract surface** between user ELF binaries and the kernel. If you add or renumber a syscall in the kernel, you **must**:
 
@@ -213,7 +213,7 @@ EDI = 3rd argument
 EAX ← return value (signed int semantics)
 ```
 
-`sysenter`/`sysexit` steal **ECX** (return ESP) and **EDX** (return EIP), which is why the second and third arguments travel in **ESI**/**EDI**; an `int 0x80` gate is kept as a fallback (`__syscallN` in [`syscall.h`](include/syscall.h)).
+`sysenter`/`sysexit` steal **ECX** (return ESP) and **EDX** (return EIP), which is why the second and third arguments travel in **ESI**/**EDI** (`__syscallN` in [`syscall.h`](include/syscall.h)); the kernel's legacy `int 0x80` gate has been removed.
 
 ```c
 static inline intptr_t __syscall3(int num, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
