@@ -91,8 +91,12 @@ static inline struct cmsghdr *__cmsg_next(struct msghdr *mh,
 
 /* ── SOL_SOCKET option names ──────────────────────────────────────────────── */
 #define SO_REUSEADDR  2
-#define SO_KEEPALIVE  9
+#define SO_TYPE       3
 #define SO_ERROR      4
+#define SO_SNDBUF     7
+#define SO_RCVBUF     8
+#define SO_KEEPALIVE  9
+#define SO_REUSEPORT  15
 #define SO_PEERCRED   17
 
 /* Peer credentials (only used for AF_UNIX peer querying) */
