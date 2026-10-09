@@ -255,8 +255,13 @@ int pipe2(int pipefd[2], int flags) {
 }
 
 int poll(struct pollfd *fds, int nfds, int timeout_ms) {
-    return (int)__syscall3(SYS_POLL, (uintptr_t)fds, (uintptr_t)nfds,
-                           (uintptr_t)timeout_ms);
+    int r = (int)__syscall3(SYS_POLL, (uintptr_t)fds, (uintptr_t)nfds,
+                            (uintptr_t)timeout_ms);
+    /* A waiting poll() can now be interrupted (-EINTR) instead of busy-yielding
+       forever; map the kernel's negative errno onto the POSIX convention like
+       every other wrapper. */
+    if (r < 0) { errno = -r; return -1; }
+    return r;
 }
 
 int select(int nfds, fd_set *readfds, fd_set *writefds,

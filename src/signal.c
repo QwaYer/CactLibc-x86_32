@@ -144,10 +144,14 @@ int setitimer(int which, const struct itimerval *new_value,
 
 sighandler_t signal(int signum, sighandler_t handler) {
     struct sigaction sa;
-    int idx = sig_number_to_sigindex(signum);
-    if (idx < 0) return SIG_ERR;
+    /* Validate the signal, but hand `sigaction()` the *original* number: it
+     * translates by itself, so passing the already-converted index made it
+     * translate twice — `signal(SIGTERM)` (=2) became `sigaction(1)` which the
+     * translator rejects as SIGKILL's slot, so the handler was silently not
+     * installed. */
+    if (sig_number_to_sigindex(signum) < 0) return SIG_ERR;
     sa.sa_handler = handler;
-    if (sigaction(idx, &sa, NULL) < 0) return SIG_ERR;
+    if (sigaction(signum, &sa, NULL) < 0) return SIG_ERR;
     return handler;
 }
 
