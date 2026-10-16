@@ -8,10 +8,10 @@
  * process (shared vs exclusive, and dup'd descriptors of the same file map to
  * the same entry), but it cannot exclude another process.
  *
- * libwayland only uses LOCK_EX|LOCK_NB to detect a rival compositor, so the
- * denied/blocked paths are the ones that matter here.  Once the kernel grows
- * F_SETLK/F_GETLK this can be reimplemented on top of it behind the same
- * interface, without touching the callers.
+ * The callers that exist today only use LOCK_EX|LOCK_NB to probe for an
+ * existing lock, so the denied/blocked paths are the ones that matter here.
+ * Once the kernel grows F_SETLK/F_GETLK this can be reimplemented on top of it
+ * behind the same interface, without touching the callers.
  */
 #include "file.h"
 #include "stat.h"
