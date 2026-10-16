@@ -165,3 +165,16 @@ int kill(pid_t pid, int sig) {
     if (r < 0) { errno = -r; return -1; }
     return 0;
 }
+
+/* Signal every process of `pgid` (POSIX killpg).  A shell uses it to resume a
+ * stopped job as a whole instead of only its first/last member. */
+int killpg(pid_t pgid, int sig) {
+    int idx = sig_number_to_sigindex(sig);
+    if (idx < 0) idx = 0;
+    cact_killpg_arg_t a;
+    a.pgid   = (uint32_t)pgid;
+    a.signum = (uint32_t)idx;
+    int r = nio_ctl(CACT_PROCCTL_KILLPG, &a);
+    if (r < 0) { errno = -r; return -1; }
+    return 0;
+}

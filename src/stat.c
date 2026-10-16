@@ -64,9 +64,37 @@ int chown(const char *path, int uid, int gid) {
 }
 
 int lstat(const char *path, struct stat *buf) {
-    /* CactOS VFS has no symlink following in stat(); the node stat is
-     * already that of the link itself. */
-    return stat(path, buf);
+    if (!path || !buf) { errno = ENOENT; return -1; }
+
+    /* "/" is never a symlink: nothing to not-follow. */
+    if (path[0] == '/' && path[1] == '\0') return stat(path, buf);
+
+    char pbuf[512];
+    size_t i = 0;
+    while (path[i] && i < sizeof(pbuf) - 1) { pbuf[i] = path[i]; i++; }
+    pbuf[i] = '\0';
+    while (i > 1 && pbuf[i - 1] == '/') pbuf[--i] = '\0';
+
+    char base[128];
+    int  fd = nio_open_parent(pbuf, base, sizeof(base));
+    if (fd < 0) return -1;
+
+    /* The 4-word cact_stat cannot carry a link target, so ask the rich stat
+     * with NOFOLLOW and keep the fields struct stat has. */
+    cact_statx_t sx;
+    cact_statx_arg_t a;
+    a.name  = base;
+    a.buf   = &sx;
+    a.flags = CACT_AT_SYMLINK_NOFOLLOW;
+    int r = nio_ioctl(fd, CACT_DIRCTL_STATX, &a);
+    nio_close(fd);
+    if (r < 0) return nio_map(r);
+
+    buf->st_ino  = sx.ino;
+    buf->st_mode = sx.mode;
+    buf->st_size = sx.size;
+    buf->st_type = sx.type;
+    return 0;
 }
 
 /* Resolve the filesystem containing `path` via DIRCTL_STATFS. */

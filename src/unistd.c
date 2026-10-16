@@ -176,6 +176,14 @@ int setpgid(pid_t pid, pid_t pgid) {
     return nio_map(nio_ctl(CACT_PROCCTL_SETPGID, &a));
 }
 
+/* Give the console to `pgid`'s process group: the line discipline then delivers
+ * ^C/^\ /^Z and SIGWINCH to that whole group.  pgid 0 means "no foreground
+ * job".  CactOS's tcsetpgrp(3); the session leader (the shell) calls it. */
+int tcsetpgrp(int fd, pid_t pgid) {
+    uint32_t p = (uint32_t)pgid;
+    return nio_map(nio_ioctl(fd, CACT_TTYCTL_SET_FG, &p));
+}
+
 int setuid(uid_t uid) {
     return nio_map(nio_ctl(CACT_PROCCTL_SETUID, &uid));
 }

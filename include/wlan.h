@@ -7,24 +7,25 @@
 /*
  * Thin helpers over the /dev/wlan0 ioctls (CACT_WLANCTL_*).
  *
- * The node is a raw 802.11 radio: wl_tx/wl_rx move management and EAPOL frames.
- * The intended caller is wljoin (the connection utility) — scan, choose an AP,
- * auth/assoc, WPA2, then install the keys.  All return 0 on success and -1 with
- * errno set on failure unless noted.
+ * The 802.11 station engine runs in the kernel (cact80211): it scans, runs
+ * open-system auth/association and the 802.11<->802.3 datapath with CCMP.  The
+ * intended caller is wljoin — the WPA2 supplicant — which reads the scan list,
+ * asks the kernel to join a BSS, exchanges EAPOL and installs the keys.  All
+ * return 0 on success and -1 with errno set on failure unless noted.
  */
 
-/* Rescan and fill the driver's AP list; returns the AP count (>= 0) or -1. */
+/* Rescan; returns the AP count (>= 0) or -1. */
 int wl_scan(int fd);
 
-/* Transmit one raw 802.11 frame (management / EAPOL / data). */
-int wl_tx(int fd, const void *frame, uint32_t len);
+/* Fetch BSS `bss->index` from the engine's scan list into *bss (index in). */
+int wl_get_bss(int fd, cact_wlan_bss_t *bss);
 
-/* Fetch one queued received frame.  Returns 1 and *len when a frame was
- * copied, 0 when the queue is empty, -1 on error. */
-int wl_rx(int fd, void *frame, uint32_t *len);
+/* Join a BSS: the engine runs open-system auth + association. */
+int wl_connect(int fd, const uint8_t bssid[6], const uint8_t *ssid,
+               uint8_t ssid_len);
 
-int wl_set_channel(int fd, uint32_t channel);
-int wl_set_bssid(int fd, const uint8_t bssid[6]);
+/* Drop the association. */
+int wl_disconnect(int fd);
 
 /* kind = CACT_WLAN_KEY_PAIRWISE (TK) or CACT_WLAN_KEY_GROUP (GTK); key_id is
  * the GTK key id the AP assigned (ignored for the pairwise key). */
@@ -33,12 +34,12 @@ int wl_set_key(int fd, uint32_t kind, uint32_t key_id, const void *key,
 
 int wl_status(int fd, cact_wlan_status_t *st);
 
-/* Program the AP's basic-rate set and ERP timings (from its beacon) before the
- * first frame goes out: management and EAPOL then use the lowest basic rate,
- * as mac80211 does.  A zero basic mask leaves the driver's default (CCK 1M). */
-int wl_set_rates(int fd, const cact_wlan_rates_t *rates);
+/* Send one EAPOL payload to `dst` (the engine frames it as a ToDS data frame). */
+int wl_eapol_tx(int fd, const uint8_t dst[6], const void *eapol, uint32_t len);
 
-/* Mark the datapath usable (1) or down (0) once association/handshake finish. */
-int wl_set_link(int fd, int up);
+/* Fetch one received EAPOL payload into `eapol` (cap *len), setting *len to the
+ * byte count and `src` (optional) to the sender.  Returns 1 when a frame was
+ * copied, 0 when none is queued, -1 on error. */
+int wl_eapol_rx(int fd, void *eapol, uint32_t *len, uint8_t src[6]);
 
 #endif /* _WLAN_H */

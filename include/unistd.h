@@ -51,6 +51,8 @@ int     setpgid(pid_t pid, pid_t pgid);
 pid_t   getpgid(pid_t pid);
 pid_t   getpgrp(void);
 pid_t   getsid(pid_t pid);
+/* Give the console to `pgid`'s process group (0 = none); CactOS's tcsetpgrp. */
+int     tcsetpgrp(int fd, pid_t pgid);
 
 /* ── file descriptors ── */
 off_t   lseek(int fd, off_t offset, int whence);
