@@ -189,7 +189,9 @@ static struct block_header *request_space(unsigned int size) {
 }
 
 void *malloc(size_t size) {
-    if (size == 0) return 0;
+    /* A zero-size request still returns a unique, freeable pointer `p = malloc(n * sizeof(x)); if (!p) fail` must not fail just
+     * because n is legitimately 0.  calloc(0, n) inherits this. */
+    if (size == 0) size = 1;
     malloc_lock_acquire();
     heap_init();
 

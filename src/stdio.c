@@ -487,9 +487,17 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
             else if (*format == '#') { hash = 1; format++; }
             else break;
         }
-        while (*format >= '0' && *format <= '9') {
-            width = width * 10 + (*format - '0');
+        /* '*' takes the width from the argument list; a negative width means
+           left alignment with its absolute value (as in C). */
+        if (*format == '*') {
+            width = va_arg(args, int);
             format++;
+            if (width < 0) { minus = 1; width = -width; }
+        } else {
+            while (*format >= '0' && *format <= '9') {
+                width = width * 10 + (*format - '0');
+                format++;
+            }
         }
         if (*format == '.') {
             format++;
@@ -516,7 +524,7 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
         int cval = 0;
 
         switch (*format) {
-        case 'd': {
+        case 'd': case 'i': {
             if (isll) {
                 long long v = va_arg(args, long long);
                 unsigned long long u;
@@ -592,7 +600,8 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
         /* precision: max characters for strings, min digits for numbers */
         if (*format == 's') {
             if (prec >= 0 && len > prec) len = prec;
-        } else if (prec >= 0 && (*format == 'd' || *format == 'u' ||
+        } else if (prec >= 0 && (*format == 'd' || *format == 'i' ||
+                                 *format == 'u' ||
                                  *format == 'o' || *format == 'x' ||
                                  *format == 'X')) {
             zero = 0;                          /* for integers precision cancels the 0 flag */
@@ -702,9 +711,17 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
             else if (*format == '#') { hash = 1; format++; }
             else break;
         }
-        while (*format >= '0' && *format <= '9') {
-            width = width * 10 + (*format - '0');
+        /* '*' takes the width from the argument list; a negative width means
+           left alignment with its absolute value (as in C). */
+        if (*format == '*') {
+            width = va_arg(args, int);
             format++;
+            if (width < 0) { minus = 1; width = -width; }
+        } else {
+            while (*format >= '0' && *format <= '9') {
+                width = width * 10 + (*format - '0');
+                format++;
+            }
         }
         if (*format == '.') {
             format++;
@@ -731,7 +748,7 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
         int cval = 0;
 
         switch (*format) {
-        case 'd': {
+        case 'd': case 'i': {
             if (isll) {
                 long long v = va_arg(args, long long);
                 unsigned long long u;
@@ -807,7 +824,8 @@ static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, v
         /* precision: max characters for strings, min digits for numbers */
         if (*format == 's') {
             if (prec >= 0 && len > prec) len = prec;
-        } else if (prec >= 0 && (*format == 'd' || *format == 'u' ||
+        } else if (prec >= 0 && (*format == 'd' || *format == 'i' ||
+                                 *format == 'u' ||
                                  *format == 'o' || *format == 'x' ||
                                  *format == 'X')) {
             zero = 0;                          /* for integers precision cancels the 0 flag */

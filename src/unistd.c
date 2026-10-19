@@ -7,6 +7,8 @@
 #include "poll.h"
 #include "signal.h"
 #include "uio.h"
+#include "stdlib.h"     
+#include "string.h"    
 #include <stdint.h>
 
 /* ── process lifecycle (core traps) ── */
@@ -575,7 +577,45 @@ int uname(struct utsname *buf) {
 }
 
 int execvp(const char *file, char *const argv[]) {
-    return execve(file, argv, environ);
+    if (!file || !*file) { errno = ENOENT; return -1; }
+
+    /* A name containing a slash is a pathname: no search (as in POSIX). */
+    if (strchr(file, '/')) return execve(file, argv, environ);
+
+    const char *path = getenv("PATH");
+    if (!path || !*path) path = "/usr/bin:/usr/sbin:/bin:/sbin";
+
+    size_t nlen = strlen(file);
+    for (const char *p = path; ; ) {
+        const char *colon = strchr(p, ':');
+        size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
+
+        /* An empty entry stands for the current directory. */
+        char cand[512];
+        int fits = 0;
+        if (dlen == 0) {
+            if (nlen + 1 <= sizeof(cand)) {
+                memcpy(cand, file, nlen + 1);
+                fits = 1;
+            }
+        } else if (dlen + 1 + nlen + 1 <= sizeof(cand)) {
+            memcpy(cand, p, dlen);
+            cand[dlen] = '/';
+            memcpy(cand + dlen + 1, file, nlen + 1);
+            fits = 1;
+        }
+        if (fits) execve(cand, argv, environ);
+
+        if (!colon) break;
+        p = colon + 1;
+    }
+
+    /* Nothing ran.  The kernel collapses every exec failure to a single
+     * negative value (sys_exec returns -1 for "not found" and for "not
+     * executable" alike), so a bare name that ran nowhere is reported the way
+     * callers act on it: not found. */
+    errno = ENOENT;
+    return -1;
 }
 
 int isatty(int fd) {
