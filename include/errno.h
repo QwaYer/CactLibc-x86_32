@@ -135,6 +135,11 @@
 #define ERFKILL 132
 #define EHWPOISON 133
 
-extern int errno;
+/* errno is per thread.  The libc has no compiler `__thread` yet (the kernel
+ * provides no TLS mechanism), so the thread-local slot is reached through
+ * __errno_location(), which is keyed off the running thread's stack — no
+ * syscall, see src/thread_local.c. */
+int *__errno_location(void);
+#define errno (*__errno_location())
 
 #endif

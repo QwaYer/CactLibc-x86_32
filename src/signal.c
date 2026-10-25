@@ -1,7 +1,9 @@
 #include "signal.h"
 #include "syscall.h"
 #include "nodeio.h"
+#include "ioctl_abi.h"   /* the ctl commands and their argument structs */
 #include "errno.h"
+#include "string.h"
 #include <stdint.h>
 
 /* Signal indices/masks — in the kernel representation (bit = index). */
@@ -39,11 +41,60 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     if (!act) { errno = EINVAL; return -1; }
     int idx = sig_number_to_sigindex(signum);
     if (idx < 0) { errno = EINVAL; return -1; }
+    /* sa_handler and sa_sigaction are two fields here (not the POSIX union),
+     * so take whichever one the flags select.  With SA_SIGINFO the kernel
+     * builds a siginfo_t and a ucontext_t into the signal frame and enters the
+     * routine as void (*)(int, siginfo_t *, void *). */
+    uint32_t h = (uint32_t)(uintptr_t)act->sa_handler;
+    if ((act->sa_flags & SA_SIGINFO) && act->sa_sigaction)
+        h = (uint32_t)(uintptr_t)act->sa_sigaction;
+
     cact_sigaction_arg_t a;
     a.signum  = (uint32_t)idx;
-    a.handler = (uint32_t)(uintptr_t)act->sa_handler;
+    a.handler = h;
+    /* The flags travel with the disposition; the kernel acts on SA_ONSTACK,
+     * SA_SIGINFO and SA_NODEFER. */
+    a.flags   = (uint32_t)act->sa_flags;
+    /* The set to block while this handler runs.  POSIX also blocks the
+     * delivered signal itself, unless SA_NODEFER. */
+    a.mask    = (uint32_t)act->sa_mask;
     int r = nio_ctl(CACT_PROCCTL_SIGACTION, &a);
     if (r < 0) { errno = -r; return -1; }
+    return 0;
+}
+
+/* Alternate signal stack.  The kernel keeps it per task and disables it across
+ * exec(); as on Linux, the state cannot be changed while a handler is running
+ * on it (EPERM), and SS_ONSTACK is only known to the kernel. */
+int sigaltstack(const stack_t *ss, stack_t *old_ss) {
+    cact_sigaltstack_arg_t a;
+    memset(&a, 0, sizeof a);            /* all zero = query only */
+
+    if (ss) {
+        int r = nio_ctl(CACT_PROCCTL_SIGALTSTACK, &a);
+        if (r < 0) { errno = -r; return -1; }
+        if (a.old_flags & CACT_SS_ONSTACK) { errno = EPERM; return -1; }
+
+        if (ss->ss_flags & ~SS_DISABLE) { errno = EINVAL; return -1; }
+        if (ss->ss_flags & SS_DISABLE) {
+            a.flags = CACT_SS_DISABLE;
+        } else {
+            if (!ss->ss_sp) { errno = EINVAL; return -1; }
+            if (ss->ss_size < MINSIGSTKSZ) { errno = ENOMEM; return -1; }
+            a.sp   = (uint32_t)(uintptr_t)ss->ss_sp;
+            a.size = (uint32_t)ss->ss_size;
+        }
+    }
+
+    int r = nio_ctl(CACT_PROCCTL_SIGALTSTACK, &a);
+    if (r < 0) { errno = -r; return -1; }
+
+    if (old_ss) {
+        old_ss->ss_sp    = (void *)(uintptr_t)a.old_sp;
+        old_ss->ss_size  = (size_t)a.old_size;
+        old_ss->ss_flags = (int)(a.old_flags & (CACT_SS_ONSTACK | CACT_SS_DISABLE));
+        if (a.old_sp == 0) old_ss->ss_flags |= SS_DISABLE;   /* never installed */
+    }
     return 0;
 }
 
@@ -64,6 +115,13 @@ int sigdelset(sigset_t *set, int signum) {
     int idx = sig_number_to_sigindex(signum);
     if (idx < 0) { errno = EINVAL; return -1; }
     *set &= ~(1u << idx);
+    return 0;
+}
+
+int sigfillset(sigset_t *set) {
+    if (!set) { errno = EINVAL; return -1; }
+    /* Every kernel signal bit, minus the two that cannot be caught. */
+    *set = ((1u << KERNEL_NSIG) - 1u) & ~(unsigned)(SIGKILL | SIGSTOP);
     return 0;
 }
 
@@ -175,6 +233,106 @@ int killpg(pid_t pgid, int sig) {
     a.pgid   = (uint32_t)pgid;
     a.signum = (uint32_t)idx;
     int r = nio_ctl(CACT_PROCCTL_KILLPG, &a);
+    if (r < 0) { errno = -r; return -1; }
+    return 0;
+}
+
+/* ── the synchronous half: sigwait/sigwaitinfo/sigtimedwait ───────────────
+ *
+ * The kernel does the waiting and the *consuming* (CACT_PROCCTL_SIGWAIT): a
+ * signal in `set` is taken out of the pending set instead of being delivered, so
+ * no handler runs — that is what makes sigwait() different from sigsuspend().
+ * The kernel hands back the signal's *index*, which becomes one of the SIG*
+ * values above, so `case SIGINT:` works on the result.
+ *
+ * The kernel reports its own error numbers (which are also this libc's), so the
+ * wrappers below only have to decide which of the two POSIX conventions each
+ * entry point uses: sigwait() returns an error *number*, sigwaitinfo() and
+ * sigtimedwait() return the signal number or -1/errno. */
+
+static int sigwait_core(const sigset_t *set, int timeout_ms, int *signum_out,
+                        uint32_t *code_out, uint32_t *value_out) {
+    cact_sigwait_arg_t a;
+    int r;
+
+    if (!set) return EINVAL;
+    a.set        = *set;
+    a.timeout_ms = timeout_ms;
+    a.signum     = 0;
+    a.code       = 0;
+    a.value      = 0;
+    r = nio_ctl(CACT_PROCCTL_SIGWAIT, &a);
+    if (r < 0) return -r;                  /* EINVAL, EAGAIN, … */
+    if (signum_out) *signum_out = (int)(1u << a.signum);
+    if (code_out)   *code_out   = a.code;
+    if (value_out)  *value_out  = a.value;
+    return 0;
+}
+
+int sigwait(const sigset_t *set, int *sig) {
+    int s = 0;
+    int r;
+    if (!sig) return EINVAL;
+    r = sigwait_core(set, -1, &s, 0, 0);
+    if (r != 0) return r;                  /* POSIX: the error number itself */
+    *sig = s;
+    return 0;
+}
+
+/* Fill in what the kernel reported.  si_addr stays 0: a waited-for signal comes
+ * from a sender, not from a fault, so it carries a value rather than an address.
+ * (The window's own int is the value, as POSIX's union sigval allows.) */
+static void sigwait_fill_info(siginfo_t *info, int signum, uint32_t code,
+                              uint32_t value) {
+    if (!info) return;
+    info->si_signo = signum;
+    info->si_code  = (int)code;
+    info->si_addr  = 0;
+    info->si_value.sival_int = (int)value;
+}
+
+int sigwaitinfo(const sigset_t *set, siginfo_t *info) {
+    int s = 0;
+    uint32_t code = 0, value = 0;
+    int r = sigwait_core(set, -1, &s, &code, &value);
+    if (r != 0) { errno = r; return -1; }
+    sigwait_fill_info(info, s, code, value);
+    return s;                              /* POSIX: the signal number */
+}
+
+int sigtimedwait(const sigset_t *set, siginfo_t *info,
+                 const struct timespec *timeout) {
+    int s = 0, ms, r;
+    uint32_t code = 0, value = 0;
+
+    if (timeout) {
+        long long ns, msv;
+        if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 ||
+            timeout->tv_nsec >= 1000000000L)
+            { errno = EINVAL; return -1; }
+        ns  = (long long)timeout->tv_sec * 1000000000LL + timeout->tv_nsec;
+        msv = (ns + 999999LL) / 1000000LL;   /* round up: never wait less */
+        ms  = (msv > 2147483647LL) ? 2147483647 : (int)msv;
+    } else {
+        ms = -1;                           /* wait forever */
+    }
+
+    r = sigwait_core(set, ms, &s, &code, &value);
+    if (r != 0) { errno = r; return -1; }  /* EAGAIN when it timed out */
+    sigwait_fill_info(info, s, code, value);
+    return s;
+}
+
+int sigqueue(pid_t pid, int sig, const union sigval value) {
+    cact_sigqueue_arg_t a;
+    int idx = sig_number_to_sigindex(sig);
+    int r;
+
+    if (idx < 0) { errno = EINVAL; return -1; }
+    a.pid    = (uint32_t)pid;
+    a.signum = (uint32_t)idx;
+    a.value  = (uint32_t)value.sival_int;
+    r = nio_ctl(CACT_PROCCTL_SIGQUEUE, &a);
     if (r < 0) { errno = -r; return -1; }
     return 0;
 }

@@ -1,4 +1,5 @@
 #include "time.h"
+#include "tz.h"
 #include "nodeio.h"
 #include "syscall.h"
 #include "errno.h"
@@ -43,6 +44,31 @@ int clock_gettime(int clkid, struct timespec *tp) {
     return 0;
 }
 
+int clock_getres(int clkid, struct timespec *res) {
+    if (clkid != CLOCK_REALTIME && clkid != CLOCK_MONOTONIC) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (res) { res->tv_sec = 0; res->tv_nsec = 1000000; }   /* the kernel's 1 ms timer */
+    return 0;
+}
+
+int clock_settime(int clkid, const struct timespec *tp) {
+    if (clkid != CLOCK_REALTIME) {          /* there is no settable monotonic clock */
+        errno = EINVAL;
+        return -1;
+    }
+    if (!tp || tp->tv_sec < 0 || tp->tv_nsec < 0 || tp->tv_nsec >= 1000000000) {
+        errno = EINVAL;
+        return -1;
+    }
+    cact_time_t t;
+    t.sec  = (uint32_t)tp->tv_sec;
+    t.usec = (uint32_t)(tp->tv_nsec / 1000);
+    int r = nio_dev_cmd("sys", CACT_SYSCTL_SETWALLCLOCK, &t);
+    return nio_map(r);
+}
+
 int nanosleep(const struct timespec *req, struct timespec *rem) {
     if (!req || req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000) {
         errno = EINVAL;
@@ -56,7 +82,36 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
     return 0;
 }
 
+/* Like nanosleep(), but like POSIX also: it names the clock to sleep against,
+ * may take an absolute deadline (TIMER_ABSTIME), and — unlike every other call
+ * here — returns the error number itself instead of setting errno. */
+int clock_nanosleep(int clkid, int flags, const struct timespec *req,
+                    struct timespec *rem) {
+    if (clkid != CLOCK_REALTIME && clkid != CLOCK_MONOTONIC) return EINVAL;
+    if (flags & ~TIMER_ABSTIME) return EINVAL;
+    if (!req || req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000)
+        return EINVAL;
+
+    if (flags & TIMER_ABSTIME) {
+        struct timespec now, sleep_for;
+        long long deadline, now_ns, rel;
+        if (clock_gettime(clkid, &now) != 0) return errno;
+        deadline = (long long)req->tv_sec * 1000000000LL + req->tv_nsec;
+        now_ns   = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
+        rel      = deadline - now_ns;
+        if (rel <= 0) return 0;                    /* already due */
+        sleep_for.tv_sec  = (long)(rel / 1000000000LL);
+        sleep_for.tv_nsec = (long)(rel % 1000000000LL);
+        if (nanosleep(&sleep_for, 0) != 0) return errno;
+        return 0;                                  /* rem is unused for an absolute wait */
+    }
+
+    if (nanosleep(req, rem) != 0) return errno;
+    return 0;
+}
+
 static struct tm __gmt;
+static struct tm __local;
 static char __asctime_buf[32];
 static char __ctime_buf[32];
 
@@ -76,29 +131,48 @@ static int _isleap(int y) {
 }
 
 static void _fill_gmtime(time_t t, struct tm *r) {
-    int days = (int)(t / 86400);
-    int rem  = (int)(t % 86400);
-    r->tm_sec = rem % 60; rem /= 60;
-    r->tm_min = rem % 60; rem /= 60;
-    r->tm_hour = rem;
-    r->tm_wday = (days + 4) % 7;
-    int y, m;
-    for (y = 1970;; y++) {
-        int d = _isleap(y) ? 366 : 365;
-        if (days < d) break;
-        days -= d;
+    /* Floor division, so times before 1970 do not come out with a negative
+     * second / minute / hour. */
+    long days = (long)t / 86400;
+    long rem  = (long)t % 86400;
+    if (rem < 0) { rem += 86400; days -= 1; }
+
+    r->tm_sec  = (int)(rem % 60); rem /= 60;
+    r->tm_min  = (int)(rem % 60); rem /= 60;
+    r->tm_hour = (int)rem;
+
+    {
+        long w = (days + 4) % 7;                 /* 1970-01-01 was a Thursday */
+        if (w < 0) w += 7;
+        r->tm_wday = (int)w;
     }
+
+    long y;
+    if (days >= 0) {
+        for (y = 1970;; y++) {
+            long d = _isleap(y) ? 366 : 365;
+            if (days < d) break;
+            days -= d;
+        }
+    } else {
+        for (y = 1969;; y--) {
+            days += _isleap(y) ? 366 : 365;      /* step into year y */
+            if (days >= 0) break;
+        }
+    }
+    r->tm_year = (int)(y - 1900);
+    r->tm_yday = (int)days;                      /* day of year, 0-based */
+
     static const int mdays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    int m;
     for (m = 0; m < 12; m++) {
-        int d = mdays[m];
+        long d = mdays[m];
         if (m == 1 && _isleap(y)) d = 29;
         if (days < d) break;
         days -= d;
     }
-    r->tm_year = y - 1900;
     r->tm_mon  = m;
-    r->tm_mday = days + 1;
-    r->tm_yday = (int)(t / 86400);
+    r->tm_mday = (int)days + 1;
     r->tm_isdst = 0;
 }
 
@@ -112,12 +186,31 @@ struct tm *gmtime(const time_t *timep) {
     return gmtime_r(timep, &__gmt);
 }
 
+/* Local time is civil time plus the zone's offset at that instant; the zone
+ * comes from TZ (src/tz.c). */
 struct tm *localtime_r(const time_t *timep, struct tm *result) {
-    return gmtime_r(timep, result);
+    if (!timep || !result) return 0;
+    int isdst = 0;
+    long east = cact_tz_offset_utc((long)*timep, &isdst);
+    time_t shifted = (time_t)((long)*timep + east);
+    if (!gmtime_r(&shifted, result)) return 0;
+    result->tm_isdst = isdst;
+    return result;
 }
 
 struct tm *localtime(const time_t *timep) {
-    return gmtime(timep);
+    return localtime_r(timep, &__local);
+}
+
+/* Days from 1970-01-01 to y-m-d (proleptic Gregorian), for any year. */
+static long _days_from_civil(long y, long m, long d) {
+    y -= (m <= 2) ? 1 : 0;
+    long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned mp  = (unsigned)((m + 9) % 12);
+    unsigned doy = (153u * mp + 2u) / 5u + (unsigned)d - 1u;
+    unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    return era * 146097L + (long)doe - 719468L;
 }
 
 time_t mktime(struct tm *tm) {
@@ -125,27 +218,17 @@ time_t mktime(struct tm *tm) {
     int y = tm->tm_year + 1900;
     int m = tm->tm_mon;
     int d = tm->tm_mday;
-    if (m < 0 || m > 11 || d < 1 || d > 31 || y < 1970) return (time_t)-1;
+    if (m < 0 || m > 11 || d < 1 || d > 31 || y < 1) return (time_t)-1;
 
-    long days = 0;
-    for (int yy = 1970; yy < y; yy++) days += _isleap(yy) ? 366 : 365;
-    static const int mdays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    for (int mm = 0; mm < m; mm++) {
-        days += mdays[mm];
-        if (mm == 1 && _isleap(y)) days++;
-    }
-    days += d - 1;
+    time_t t = (time_t)cact_tz_utc_from_tm(tm);
 
-    time_t t = days * 86400 + tm->tm_hour * 3600 + tm->tm_min * 60 + tm->tm_sec;
+    long days = _days_from_civil(y, m + 1, d);
+    tm->tm_wday = (int)(((days + 4) % 7 + 7) % 7);
+    tm->tm_yday = (int)(days - _days_from_civil(y, 1, 1));
 
-    tm->tm_wday = (int)((days + 4) % 7);
-    int yday = d - 1;
-    for (int mm = 0; mm < m; mm++) {
-        yday += mdays[mm];
-        if (mm == 1 && _isleap(y)) yday++;
-    }
-    tm->tm_yday = yday;
-    tm->tm_isdst = 0;
+    int isdst = 0;
+    cact_tz_offset_utc((long)t, &isdst);
+    tm->tm_isdst = isdst;
     return t;
 }
 

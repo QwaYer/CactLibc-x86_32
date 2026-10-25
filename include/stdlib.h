@@ -14,6 +14,14 @@ void free(void *ptr);
 void *calloc(size_t nmemb, size_t size);
 void *realloc(void *ptr, size_t size);
 
+/* Aligned allocation.  The pointers they return go back through free() (and
+ * realloc()) like any other: the block header sits immediately before the
+ * payload.  alignment must be a power of two and a multiple of sizeof(void *);
+ * posix_memalign returns 0 or an errno, the others return NULL and set errno. */
+int   posix_memalign(void **memptr, size_t alignment, size_t size);
+void *aligned_alloc(size_t alignment, size_t size);
+void *memalign(size_t alignment, size_t size);
+
 int atexit(void (*function)(void));
 void abort(void);
 char *getenv(const char *name);

@@ -93,7 +93,7 @@ static int _vscan(_src_t *s, const char *format, va_list ap) {
         }
 
         unsigned int base;
-        int allow_sign;
+        int allow_sign = 0;
         switch (conv) {
         case 'd': case 'i': base = 10; allow_sign = 1; break;
         case 'u':           base = 10; allow_sign = 0; break;

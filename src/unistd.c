@@ -7,8 +7,9 @@
 #include "poll.h"
 #include "signal.h"
 #include "uio.h"
-#include "stdlib.h"     
-#include "string.h"    
+#include "stdlib.h"
+#include "string.h"
+#include "pthread.h"      /* the fork() handlers: pthread_atfork() */
 #include <stdint.h>
 
 /* ── process lifecycle (core traps) ── */
@@ -26,7 +27,14 @@ int close(int fd) {
 }
 
 pid_t fork(void) {
-    return (pid_t)syscall(SYS_FORK, 0, 0, 0);
+    pid_t p;
+    /* pthread_atfork(): prepare around the trap, then the parent's or the
+     * child's handlers on their own side of it. */
+    __cact_atfork_prepare();
+    p = (pid_t)syscall(SYS_FORK, 0, 0, 0);
+    if (p == 0)      __cact_atfork_child();
+    else if (p > 0)  __cact_atfork_parent();
+    return p;
 }
 
 int execve(const char *pathname, char *const argv[], char *const envp[]) {

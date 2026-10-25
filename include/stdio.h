@@ -69,4 +69,10 @@ int vsscanf(const char *str, const char *format, va_list ap);
 FILE *popen(const char *command, const char *type);
 int pclose(FILE *stream);
 
+/* printf-to-buffer (malloc'd) and printf-to-fd. */
+int asprintf(char **strp, const char *format, ...);
+int vasprintf(char **strp, const char *format, va_list ap);
+int dprintf(int fd, const char *format, ...);
+int vdprintf(int fd, const char *format, va_list ap);
+
 #endif

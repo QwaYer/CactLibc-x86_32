@@ -5,6 +5,7 @@
 #include "fcntl.h"
 #include "nodeio.h"
 #include "errno.h"
+#include "locale.h"
 #include <stdarg.h>
 #include <stdint.h>
 
@@ -475,135 +476,397 @@ static int _fmt_double(double v, int prec, int conv, char *out, int cap) {
     return (n < 0) ? _fmt_sci(v, prec, upper, out, cap) : n;
 }
 
-int vfprintf(FILE *stream, const char *format, va_list args) {
-    for (; *format; format++) {
-        if (*format != '%') { fputc(*format, stream); continue; }
+/* ── argument slots: positional (%n$…), width/precision from the list ─────
+ * The format is walked twice.  The first walk records, for each argument
+ * position, the type its conversion expects; the values are then pulled out
+ * of the va_list in position order (position 1 is the first argument after
+ * the format, whether the format names it "%1$" or not).  That is what makes
+ * "%2$s %1$s" work off a single va_list, and leaves the ordinary
+ * non-positional path byte-for-byte as cheap as it was. */
 
-        format++;
-        int zero = 0, minus = 0, hash = 0, width = 0, prec = -1, islong = 0, isll = 0;
-        for (;;) {
-            if (*format == '0') { zero = 1; format++; }
-            else if (*format == '-') { minus = 1; format++; }
-            else if (*format == '#') { hash = 1; format++; }
-            else break;
+typedef union {
+    long long          i;
+    unsigned long long u;
+    long double        ld;
+    void              *p;
+} _fmt_slot_t;
+
+enum {
+    _K_NONE = 0, _K_INT, _K_UINT, _K_LONG, _K_ULONG,
+    _K_LLONG, _K_ULLONG, _K_DBL, _K_LDBL, _K_PTR
+};
+
+#define _FMT_MAXARGS 64
+
+/* Length-modifier encoding (dst/sdst/q follow the C99/GNU spellings). */
+enum {
+    _LEN_NONE = 0, _LEN_H, _LEN_HH, _LEN_L, _LEN_LL, _LEN_LD,
+    _LEN_Z, _LEN_T, _LEN_J
+};
+
+/* The value kind a conversion consumes.  'm' and '%%' take no argument. */
+static int _arg_kind(int conv, int len) {
+    switch (conv) {
+    case 'd': case 'i':
+        if (len == _LEN_LL || len == _LEN_J) return _K_LLONG;
+        if (len == _LEN_L  || len == _LEN_Z || len == _LEN_T) return _K_LONG;
+        return _K_INT;
+    case 'u': case 'o': case 'x': case 'X':
+        if (len == _LEN_LL || len == _LEN_J) return _K_ULLONG;
+        if (len == _LEN_L  || len == _LEN_Z || len == _LEN_T) return _K_ULONG;
+        return _K_UINT;
+    case 'c':
+        return _K_INT;
+    case 'f': case 'F': case 'e': case 'E': case 'g': case 'G':
+        return (len == _LEN_LD) ? _K_LDBL : _K_DBL;
+    case 's': case 'p': case 'n':
+        return _K_PTR;
+    default:
+        return _K_NONE;
+    }
+}
+
+struct _spec {
+    int zero, minus, plus, space, hash, group;
+    int width, prec;                /* -1 = absent, -2 = taken from the list */
+    int wpos, ppos;                 /* positional index of a '*' argument, else 0 */
+    int pos;                        /* positional index of the value, else 0 */
+    int len;                        /* _LEN_* */
+    int conv;
+};
+
+static const char *_scan_uint(const char *f, int *out) {
+    int n = 0;
+    while (*f >= '0' && *f <= '9') { n = n * 10 + (*f - '0'); f++; }
+    *out = n;
+    return f;
+}
+
+/* Parse one directive; *pf points just past the '%'.  On success stores *s
+ * and advances *pf past the conversion letter.  On a malformed directive
+ * returns 0 and leaves *pf alone, so the caller can emit the '%' literally. */
+static int _parse_spec(const char **pf, struct _spec *s) {
+    const char *f = *pf;
+
+    s->zero = s->minus = s->plus = s->space = s->hash = s->group = 0;
+    s->width = s->prec = -1;
+    s->wpos = s->ppos = s->pos = 0;
+    s->len = _LEN_NONE;
+
+    if (*f >= '1' && *f <= '9') {                 /* "%2$…" value index */
+        const char *g = _scan_uint(f, &s->pos);
+        if (*g == '$') f = g + 1;
+        else           s->pos = 0;
+    }
+    for (;;) {                                    /* flags */
+        if      (*f == '0') s->zero  = 1;
+        else if (*f == '-') s->minus = 1;
+        else if (*f == '+') s->plus  = 1;
+        else if (*f == ' ') s->space = 1;
+        else if (*f == '#') s->hash  = 1;
+        else if (*f == '\'') s->group = 1;
+        else break;
+        f++;
+    }
+    if (*f == '*') {                              /* width */
+        f++;
+        if (*f >= '1' && *f <= '9') {
+            const char *g = _scan_uint(f, &s->wpos);
+            if (*g == '$') f = g + 1; else s->wpos = 0;
         }
-        /* '*' takes the width from the argument list; a negative width means
-           left alignment with its absolute value (as in C). */
-        if (*format == '*') {
-            width = va_arg(args, int);
-            format++;
-            if (width < 0) { minus = 1; width = -width; }
+        s->width = -2;
+    } else if (*f >= '0' && *f <= '9') {
+        f = _scan_uint(f, &s->width);
+    }
+    if (*f == '.') {                              /* precision */
+        f++;
+        if (*f == '*') {
+            f++;
+            if (*f >= '1' && *f <= '9') {
+                const char *g = _scan_uint(f, &s->ppos);
+                if (*g == '$') f = g + 1; else s->ppos = 0;
+            }
+            s->prec = -2;
+        } else if (*f >= '0' && *f <= '9') {
+            f = _scan_uint(f, &s->prec);
         } else {
-            while (*format >= '0' && *format <= '9') {
-                width = width * 10 + (*format - '0');
-                format++;
-            }
+            s->prec = 0;                          /* "%.-" means "%.0" */
         }
-        if (*format == '.') {
-            format++;
-            if (*format == '*') { prec = va_arg(args, int); format++; }
-            else {
-                prec = 0;
-                while (*format >= '0' && *format <= '9') {
-                    prec = prec * 10 + (*format - '0');
-                    format++;
-                }
-            }
-            if (prec < 0) prec = -1;
+    }
+    if (*f == 'h') { f++; if (*f == 'h') { s->len = _LEN_HH; f++; } else s->len = _LEN_H; }
+    else if (*f == 'l') { f++; if (*f == 'l') { s->len = _LEN_LL; f++; } else s->len = _LEN_L; }
+    else if (*f == 'L') { s->len = _LEN_LD; f++; }
+    else if (*f == 'z') { s->len = _LEN_Z;  f++; }
+    else if (*f == 't') { s->len = _LEN_T;  f++; }
+    else if (*f == 'j') { s->len = _LEN_J;  f++; }
+    else if (*f == 'q') { s->len = _LEN_LL; f++; }
+
+    if (*f == '\0') return 0;
+    s->conv = (unsigned char)*f;
+    *pf = f + 1;
+    return 1;
+}
+
+/* First walk: fill kind[] per argument position and report the highest one.
+ * A position the format never names has no type; like glibc, assume pointer
+ * size for it (all that is needed is to advance the list past it) instead of
+ * rejecting the call. */
+static void _collect_args(const char *format, unsigned char *kind, int *p_max) {
+    const char *f = format;
+    int argpos = 1, max = 0;
+
+    while (*f) {
+        if (*f != '%') { f++; continue; }
+        f++;
+        struct _spec s;
+        if (!_parse_spec(&f, &s)) continue;
+
+        if (s.width == -2) {
+            int i = s.wpos ? s.wpos : argpos++;
+            if (i > 0 && i < _FMT_MAXARGS) kind[i] = _K_INT;
+            if (i > max) max = i;
         }
-        {
-            int nl = 0;
-            while (*format == 'l') { nl++; format++; }
-            islong = (nl == 1);
-            isll   = (nl >= 2);
+        if (s.prec == -2) {
+            int i = s.ppos ? s.ppos : argpos++;
+            if (i > 0 && i < _FMT_MAXARGS) kind[i] = _K_INT;
+            if (i > max) max = i;
+        }
+        if (_arg_kind(s.conv, s.len) != _K_NONE) {
+            int i = s.pos ? s.pos : argpos++;
+            if (i > 0 && i < _FMT_MAXARGS) kind[i] = (unsigned char)_arg_kind(s.conv, s.len);
+            if (i > max) max = i;
+        } else if (s.pos > max) {
+            max = s.pos;                          /* positions past a %%/%m */
+        }
+    }
+
+    for (int i = 1; i <= max; i++)
+        if (kind[i] == _K_NONE) kind[i] = _K_PTR;
+    *p_max = max;
+}
+
+static void _fill_args(va_list args, const unsigned char *kind, int max, _fmt_slot_t *slot) {
+    va_list ap;
+    va_copy(ap, args);
+    for (int i = 1; i <= max; i++) {
+        switch (kind[i]) {
+        case _K_INT:    slot[i].i  = va_arg(ap, int);               break;
+        case _K_UINT:   slot[i].u  = va_arg(ap, unsigned int);      break;
+        case _K_LONG:   slot[i].i  = va_arg(ap, long);              break;
+        case _K_ULONG:  slot[i].u  = va_arg(ap, unsigned long);     break;
+        case _K_LLONG:  slot[i].i  = va_arg(ap, long long);         break;
+        case _K_ULLONG: slot[i].u  = va_arg(ap, unsigned long long); break;
+        case _K_DBL:    slot[i].ld = va_arg(ap, double);            break;
+        case _K_LDBL:   slot[i].ld = va_arg(ap, long double);       break;
+        case _K_PTR:    slot[i].p  = va_arg(ap, void *);            break;
+        default: break;
+        }
+    }
+    va_end(ap);
+}
+
+/* Insert the locale's thousands separators into a run of decimal digits
+ * (printf's `'` flag).  With the C locale's empty separator this is a plain
+ * copy, so the flag is inert exactly as it is in glibc's C locale. */
+static int _group_digits(char *out, int cap, const char *dig, int n,
+                         const char *sep, const char *grp) {
+    int m = (n < cap - 1) ? n : cap - 1;
+    if (!sep || !sep[0] || !grp || !grp[0] || (unsigned char)grp[0] == 127) {
+        for (int i = 0; i < m; i++) out[i] = dig[i];
+        out[m] = '\0';
+        return m;
+    }
+    int glen = (int)strlen(sep);
+    int group = (unsigned char)grp[0];
+    if (group <= 0) group = 1;
+
+    char rev[80];
+    int r = 0, since = 0;
+    for (int i = n - 1; i >= 0 && r < (int)sizeof(rev) - glen - 1; i--) {
+        if (since == group) {
+            for (int j = glen - 1; j >= 0; j--) rev[r++] = sep[j];
+            since = 0;
+        }
+        rev[r++] = dig[i];
+        since++;
+    }
+    m = (r < cap - 1) ? r : cap - 1;
+    for (int i = 0; i < m; i++) out[i] = rev[r - 1 - i];
+    out[m] = '\0';
+    return m;
+}
+
+/* ── the one formatter ────────────────────────────────────────────────────
+ * The whole printf family is produced here, once.  Only the sink differs:
+ *
+ *   vfprintf  -> _file_sink_put   : write(2) per buffer flush (it used to be
+ *                                   one write per *character*)
+ *   vsnprintf -> _buf_sink_put    : copies what fits, counts everything
+ *
+ * Keeping two near-identical copies of this engine (a FILE one and a buffer
+ * one) is how %i and %* went missing from both for so long, so there is now
+ * exactly one, writing through `_o_char` into a coalescing staging buffer.
+ */
+
+typedef struct {
+    void (*put)(void *ctx, const char *s, size_t n);
+    void *ctx;
+    int   count;                        /* bytes handed to the sink */
+    char  stage[128];
+    int   n;
+} _fmt_out_t;
+
+static void _o_flush(_fmt_out_t *o) {
+    if (o->n) {
+        o->put(o->ctx, o->stage, (size_t)o->n);
+        o->count += o->n;
+        o->n = 0;
+    }
+}
+
+static void _o_char(_fmt_out_t *o, int c) {
+    if (o->n == (int)sizeof(o->stage)) _o_flush(o);
+    o->stage[o->n++] = (char)c;
+}
+
+static int _vfmt_core(_fmt_out_t *o, const char *format, va_list args) {
+    unsigned char kind[_FMT_MAXARGS];
+    _fmt_slot_t   slot[_FMT_MAXARGS];
+    int max = 0;
+
+    memset(kind, 0, sizeof kind);
+    _collect_args(format, kind, &max);
+    if (max > 0) _fill_args(args, kind, max, slot);
+
+    int argpos = 1;
+    const char *f = format;
+    while (*f) {
+        if (*f != '%') { _o_char(o, *f++); continue; }
+        f++;
+
+        struct _spec s;
+        if (!_parse_spec(&f, &s)) { _o_char(o, '%'); continue; }
+
+        int zero = s.zero, minus = s.minus, hash = s.hash, group = s.group;
+        int plus = s.plus, space = s.space;
+        int width = s.width, prec = s.prec;
+        if (width == -2) {                        /* from the argument list */
+            width = s.wpos ? slot[s.wpos].i : slot[argpos++].i;
+            if (width < 0) { minus = 1; width = -width; }
+        } else if (width < 0) {
+            width = 0;                            /* the width was simply absent */
+        }
+        if (prec == -2) {
+            prec = s.ppos ? slot[s.ppos].i : slot[argpos++].i;
+            if (prec < 0) prec = -1;              /* a negative * precision means "none" */
+        } else if (prec < 0) {
+            prec = -1;
         }
 
-        char tmp[64];
+        int conv = s.conv;
+        int k = _arg_kind(conv, s.len);
+        int vpos = 0;
+        if (k != _K_NONE) vpos = s.pos ? s.pos : argpos++;
+
+        char tmp[80];
         int len = 0, neg = 0, sign_len = 0;
         char *sval = 0;
         int cval = 0;
 
-        switch (*format) {
+        switch (conv) {
         case 'd': case 'i': {
-            if (isll) {
-                long long v = va_arg(args, long long);
-                unsigned long long u;
-                if (v < 0) { neg = 1; u = (unsigned long long)(-(v + 1)) + 1ULL; }
-                else       { u = (unsigned long long)v; }
-                len = _fmt_u64(u, 10, 0, tmp);
-            } else {
-                long v = islong ? va_arg(args, long) : (long)va_arg(args, int);
-                if (v < 0) { neg = 1; v = -v; }
-                len = _fmt_uint((unsigned long)v, 10, 0, tmp);
-            }
+            long long v = slot[vpos].i;
+            if      (s.len == _LEN_HH) v = (signed char)v;
+            else if (s.len == _LEN_H)  v = (short)v;
+            unsigned long long u;
+            if (v < 0) { neg = 1; u = (unsigned long long)(-(v + 1)) + 1ULL; }
+            else       { u = (unsigned long long)v; }
+            if (s.len == _LEN_LL || s.len == _LEN_J) len = _fmt_u64(u, 10, 0, tmp);
+            else                                     len = _fmt_uint((unsigned long)u, 10, 0, tmp);
             break;
         }
         case 'u': {
-            if (isll) {
-                unsigned long long v = va_arg(args, unsigned long long);
-                len = _fmt_u64(v, 10, 0, tmp);
-            } else {
-                unsigned long v = islong ? va_arg(args, unsigned long)
-                                         : (unsigned long)va_arg(args, unsigned int);
-                len = _fmt_uint(v, 10, 0, tmp);
-            }
+            unsigned long long v = slot[vpos].u;
+            if      (s.len == _LEN_HH) v = (unsigned char)v;
+            else if (s.len == _LEN_H)  v = (unsigned short)v;
+            if (s.len == _LEN_LL || s.len == _LEN_J) len = _fmt_u64(v, 10, 0, tmp);
+            else                                     len = _fmt_uint((unsigned long)v, 10, 0, tmp);
             break;
         }
         case 'o': {
-            unsigned long v = islong ? va_arg(args, unsigned long)
-                                     : (unsigned long)va_arg(args, unsigned int);
-            len = _fmt_uint(v, 8, 0, tmp);
+            unsigned long long v = slot[vpos].u;
+            if (s.len == _LEN_LL || s.len == _LEN_J) len = _fmt_u64(v, 8, 0, tmp);
+            else                                     len = _fmt_uint((unsigned long)v, 8, 0, tmp);
             break;
         }
         case 'x': case 'X': {
-            if (isll) {
-                unsigned long long v = va_arg(args, unsigned long long);
-                len = _fmt_u64(v, 16, *format == 'X', tmp);
-            } else {
-                unsigned long v = islong ? va_arg(args, unsigned long)
-                                         : (unsigned long)va_arg(args, unsigned int);
-                len = _fmt_uint(v, 16, *format == 'X', tmp);
-            }
+            unsigned long long v = slot[vpos].u;
+            if (s.len == _LEN_LL || s.len == _LEN_J) len = _fmt_u64(v, 16, conv == 'X', tmp);
+            else                                     len = _fmt_uint((unsigned long)v, 16, conv == 'X', tmp);
             break;
         }
         case 'p': {
-            void *v = va_arg(args, void *);
-            tmp[0] = '0'; tmp[1] = 'x';
-            len = _fmt_uint((unsigned long)(uintptr_t)v, 16, 0, tmp + 2) + 2;
+            void *pv = slot[vpos].p;
+            if (!pv) {                            /* glibc prints "(nil)" for NULL */
+                tmp[0] = '('; tmp[1] = 'n'; tmp[2] = 'i'; tmp[3] = 'l'; tmp[4] = ')';
+                len = 5;
+            } else {
+                tmp[0] = '0'; tmp[1] = 'x';
+                len = _fmt_uint((unsigned long)(uintptr_t)pv, 16, 0, tmp + 2) + 2;
+            }
             break;
         }
         case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
-            double dv = va_arg(args, double);
+            double dv = (double)slot[vpos].ld;
             if (dv < 0 || (dv == 0 && 1.0 / dv < 0)) { neg = 1; dv = -dv; }
-            len = _fmt_double(dv, prec < 0 ? 6 : prec, *format, tmp, (int)sizeof(tmp));
+            len = _fmt_double(dv, prec < 0 ? 6 : prec, conv, tmp, (int)sizeof(tmp));
             if (len < 0) len = 0;
             break;
         }
         case 'c':
-            cval = va_arg(args, int);
+            cval = slot[vpos].i;
             len = 1;
             break;
         case 's':
-            sval = va_arg(args, char *);
+            sval = (char *)slot[vpos].p;
             if (!sval) sval = "(null)";
             len = strlen(sval);
             break;
+        case 'n': {
+            /* No output: the count of bytes emitted so far goes through the
+               pointer.  The staged run has not been handed to the sink yet, so
+               it counts too. */
+            int nc = o->count + o->n;
+            void *p = slot[vpos].p;
+            if (p) {
+                if      (s.len == _LEN_HH) *(signed char *)p = (signed char)nc;
+                else if (s.len == _LEN_H)  *(short *)p       = (short)nc;
+                else if (s.len == _LEN_LL) *(long long *)p   = (long long)nc;
+                else if (s.len == _LEN_L || s.len == _LEN_Z ||
+                         s.len == _LEN_T || s.len == _LEN_J) *(long *)p = (long)nc;
+                else                       *(int *)p         = nc;
+            }
+            continue;
+        }
+        case 'm':                                  /* GNU: strerror(errno) */
+            sval = strerror(errno);
+            if (!sval) sval = "Unknown error";
+            len = (int)strlen(sval);
+            break;
         case '%':
-            fputc('%', stream);
+            _o_char(o, '%');
             continue;
         default:
-            fputc('%', stream);
-            fputc(*format, stream);
+            _o_char(o, '%');
+            _o_char(o, conv);
             continue;
         }
 
         /* precision: max characters for strings, min digits for numbers */
-        if (*format == 's') {
+        if (conv == 's' || conv == 'm') {
             if (prec >= 0 && len > prec) len = prec;
-        } else if (prec >= 0 && (*format == 'd' || *format == 'i' ||
-                                 *format == 'u' ||
-                                 *format == 'o' || *format == 'x' ||
-                                 *format == 'X')) {
+        } else if (prec >= 0 && (conv == 'd' || conv == 'i' || conv == 'u' ||
+                                 conv == 'o' || conv == 'x' || conv == 'X')) {
             zero = 0;                          /* for integers precision cancels the 0 flag */
             if (prec == 0 && len == 1 && tmp[0] == '0') {
                 len = 0;                       /* %.0d of zero — nothing (as in C) */
@@ -616,13 +879,45 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
             }
         }
 
-        if (*format == 's' || *format == 'c') zero = 0;
+        if (conv == 's' || conv == 'c' || conv == 'm') zero = 0;
+
+        /* # on a float keeps the decimal point even at precision 0 ("%.0f" of
+           5 is "5", but "%#.0f" is "5."); inf/nan carry no digits and are left
+           alone, as glibc prints them. */
+        if (hash && (conv == 'f' || conv == 'F' || conv == 'e' || conv == 'E' ||
+                     conv == 'g' || conv == 'G') && len > 0) {
+            int has_point = 0, has_digit = 0;
+            for (int i = 0; i < len; i++) {
+                if (tmp[i] == '.') has_point = 1;
+                if (tmp[i] >= '0' && tmp[i] <= '9') has_digit = 1;
+            }
+            if (has_digit && !has_point && len < (int)sizeof(tmp) - 1) {
+                int at = len;                     /* append, or sit before the exponent */
+                for (int i = 0; i < len; i++)
+                    if (tmp[i] == 'e' || tmp[i] == 'E') { at = i; break; }
+                for (int i = len; i > at; i--) tmp[i] = tmp[i - 1];
+                tmp[at] = '.';
+                len++;
+            }
+        }
+
+        /* ' : decimal grouping.  The C locale defines no separator, so this is
+           inert until a locale supplies one (see _group_digits). */
+        if (group && (conv == 'd' || conv == 'i' || conv == 'u')) {
+            struct lconv *lc = localeconv();
+            if (lc && lc->thousands_sep && lc->thousands_sep[0]) {
+                char g[80];
+                len = _group_digits(g, (int)sizeof(g), tmp, len,
+                                    lc->thousands_sep, lc->grouping);
+                for (int i = 0; i < len; i++) tmp[i] = g[i];
+            }
+        }
 
         /* # : for %o the leading zero is a digit, for %x/%X it is a prefix, and only
            for a nonzero value (as in C).  Width is counted together with the prefix. */
         char pfx[3] = {0};
         int pfx_len = 0;
-        if (hash && *format == 'o' && len >= 0) {
+        if (hash && conv == 'o' && len >= 0) {
             int nonzero = 0;
             for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
             if (len == 0) { tmp[0] = '0'; len = 1; }
@@ -631,45 +926,74 @@ int vfprintf(FILE *stream, const char *format, va_list args) {
                 tmp[0] = '0';
                 len++;
             }
-        } else if (hash && (*format == 'x' || *format == 'X')) {
+        } else if (hash && (conv == 'x' || conv == 'X')) {
             int nonzero = 0;
             for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
             if (nonzero) {
                 pfx[0] = '0';
-                pfx[1] = (*format == 'X') ? 'X' : 'x';
+                pfx[1] = (conv == 'X') ? 'X' : 'x';
                 pfx_len = 2;
             }
         }
 
-        if (neg) sign_len = 1;
+        /* + and space force a sign on the conversions that can be negative. */
+        char sgn = 0;
+        if (conv == 'd' || conv == 'i' || conv == 'f' || conv == 'F' ||
+            conv == 'e' || conv == 'E' || conv == 'g' || conv == 'G') {
+            if      (neg)   { sgn = '-'; sign_len = 1; }
+            else if (plus)  { sgn = '+'; sign_len = 1; }
+            else if (space) { sgn = ' '; sign_len = 1; }
+        }
+
         int pad = width - (len + sign_len + pfx_len);
         if (pad < 0) pad = 0;
 
         if (minus) {
-            if (neg) fputc('-', stream);
-            for (int i = 0; i < pfx_len; i++) fputc(pfx[i], stream);
+            if (sgn) _o_char(o, sgn);
+            for (int i = 0; i < pfx_len; i++) _o_char(o, pfx[i]);
         } else if (zero) {
-            if (neg) fputc('-', stream);
-            for (int i = 0; i < pfx_len; i++) fputc(pfx[i], stream);
-            for (int i = 0; i < pad; i++) fputc('0', stream);
+            if (sgn) _o_char(o, sgn);
+            for (int i = 0; i < pfx_len; i++) _o_char(o, pfx[i]);
+            for (int i = 0; i < pad; i++) _o_char(o, '0');
         } else {
-            for (int i = 0; i < pad; i++) fputc(' ', stream);
-            if (neg) fputc('-', stream);
-            for (int i = 0; i < pfx_len; i++) fputc(pfx[i], stream);
+            for (int i = 0; i < pad; i++) _o_char(o, ' ');
+            if (sgn) _o_char(o, sgn);
+            for (int i = 0; i < pfx_len; i++) _o_char(o, pfx[i]);
         }
 
-        if (*format == 'c') {
-            fputc(cval, stream);
-        } else if (*format == 's') {
-            for (int i = 0; i < len; i++) fputc(sval[i], stream);
+        if (conv == 'c') {
+            _o_char(o, cval);
+        } else if (conv == 's' || conv == 'm') {
+            for (int i = 0; i < len; i++) _o_char(o, sval[i]);
         } else {
-            for (int i = 0; i < len; i++) fputc(tmp[i], stream);
+            for (int i = 0; i < len; i++) _o_char(o, tmp[i]);
         }
         if (minus) {
-            for (int i = 0; i < pad; i++) fputc(' ', stream);
+            for (int i = 0; i < pad; i++) _o_char(o, ' ');
         }
     }
-    return 0;
+    _o_flush(o);
+    return o->count;
+}
+
+/* FILE sink: hand the staged run to write(2), retrying a short write. */
+static void _file_sink_put(void *ctx, const char *s, size_t n) {
+    FILE *f = (FILE *)ctx;
+    while (n > 0) {
+        ssize_t w = write(f->fd, s, n);
+        if (w <= 0) return;
+        s += w;
+        n -= (size_t)w;
+    }
+}
+
+int vfprintf(FILE *stream, const char *format, va_list args) {
+    _fmt_out_t o;
+    o.put   = _file_sink_put;
+    o.ctx   = stream;
+    o.count = 0;
+    o.n     = 0;
+    return _vfmt_core(&o, format, args);
 }
 
 int fprintf(FILE *stream, const char *format, ...) {
@@ -688,222 +1012,37 @@ int printf(const char *format, ...) {
     return ret;
 }
 
-static void _buf_putc(char **pp, size_t *pos, size_t size, int c) {
-    if (*pos < size - 1) {
-        *(*pp)++ = (char)c;
-    }
-    (*pos)++;
-}
+/* Buffer sink: copy what fits, keep counting past the end, so vsnprintf's
+ * return value is the length the call *would* have produced (as C requires). */
+typedef struct {
+    char  *dst;
+    size_t size;
+    size_t pos;
+} _buf_ctx_t;
 
-static void _buf_putn(char **pp, size_t *pos, size_t size, const char *s, int len) {
-    for (int i = 0; i < len; i++) _buf_putc(pp, pos, size, s[i]);
-}
-
-static void _buf_vfmt(char **pp, size_t *pos, size_t size, const char *format, va_list args) {
-    for (; *format; format++) {
-        if (*format != '%') { _buf_putc(pp, pos, size, *format); continue; }
-
-        format++;
-        int zero = 0, minus = 0, hash = 0, width = 0, prec = -1, islong = 0, isll = 0;
-        for (;;) {
-            if (*format == '0') { zero = 1; format++; }
-            else if (*format == '-') { minus = 1; format++; }
-            else if (*format == '#') { hash = 1; format++; }
-            else break;
-        }
-        /* '*' takes the width from the argument list; a negative width means
-           left alignment with its absolute value (as in C). */
-        if (*format == '*') {
-            width = va_arg(args, int);
-            format++;
-            if (width < 0) { minus = 1; width = -width; }
-        } else {
-            while (*format >= '0' && *format <= '9') {
-                width = width * 10 + (*format - '0');
-                format++;
-            }
-        }
-        if (*format == '.') {
-            format++;
-            if (*format == '*') { prec = va_arg(args, int); format++; }
-            else {
-                prec = 0;
-                while (*format >= '0' && *format <= '9') {
-                    prec = prec * 10 + (*format - '0');
-                    format++;
-                }
-            }
-            if (prec < 0) prec = -1;
-        }
-        {
-            int nl = 0;
-            while (*format == 'l') { nl++; format++; }
-            islong = (nl == 1);
-            isll   = (nl >= 2);
-        }
-
-        char tmp[64];
-        int len = 0, neg = 0, sign_len = 0;
-        const char *sval = 0;
-        int cval = 0;
-
-        switch (*format) {
-        case 'd': case 'i': {
-            if (isll) {
-                long long v = va_arg(args, long long);
-                unsigned long long u;
-                if (v < 0) { neg = 1; u = (unsigned long long)(-(v + 1)) + 1ULL; }
-                else       { u = (unsigned long long)v; }
-                len = _fmt_u64(u, 10, 0, tmp);
-            } else {
-                long v = islong ? va_arg(args, long) : (long)va_arg(args, int);
-                if (v < 0) { neg = 1; v = -v; }
-                len = _fmt_uint((unsigned long)v, 10, 0, tmp);
-            }
-            break;
-        }
-        case 'u': {
-            if (isll) {
-                unsigned long long v = va_arg(args, unsigned long long);
-                len = _fmt_u64(v, 10, 0, tmp);
-            } else {
-                unsigned long v = islong ? va_arg(args, unsigned long)
-                                         : (unsigned long)va_arg(args, unsigned int);
-                len = _fmt_uint(v, 10, 0, tmp);
-            }
-            break;
-        }
-        case 'o': {
-            unsigned long v = islong ? va_arg(args, unsigned long)
-                                     : (unsigned long)va_arg(args, unsigned int);
-            len = _fmt_uint(v, 8, 0, tmp);
-            break;
-        }
-        case 'x': case 'X': {
-            if (isll) {
-                unsigned long long v = va_arg(args, unsigned long long);
-                len = _fmt_u64(v, 16, *format == 'X', tmp);
-            } else {
-                unsigned long v = islong ? va_arg(args, unsigned long)
-                                         : (unsigned long)va_arg(args, unsigned int);
-                len = _fmt_uint(v, 16, *format == 'X', tmp);
-            }
-            break;
-        }
-        case 'p': {
-            void *v = va_arg(args, void *);
-            tmp[0] = '0'; tmp[1] = 'x';
-            len = _fmt_uint((unsigned long)(uintptr_t)v, 16, 0, tmp + 2) + 2;
-            break;
-        }
-        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
-            double dv = va_arg(args, double);
-            if (dv < 0 || (dv == 0 && 1.0 / dv < 0)) { neg = 1; dv = -dv; }
-            len = _fmt_double(dv, prec < 0 ? 6 : prec, *format, tmp, (int)sizeof(tmp));
-            if (len < 0) len = 0;
-            break;
-        }
-        case 'c':
-            cval = va_arg(args, int);
-            len = 1;
-            break;
-        case 's':
-            sval = va_arg(args, const char *);
-            if (!sval) sval = "(null)";
-            len = strlen(sval);
-            break;
-        case '%':
-            _buf_putc(pp, pos, size, '%');
-            continue;
-        default:
-            _buf_putc(pp, pos, size, '%');
-            _buf_putc(pp, pos, size, *format);
-            continue;
-        }
-
-        /* precision: max characters for strings, min digits for numbers */
-        if (*format == 's') {
-            if (prec >= 0 && len > prec) len = prec;
-        } else if (prec >= 0 && (*format == 'd' || *format == 'i' ||
-                                 *format == 'u' ||
-                                 *format == 'o' || *format == 'x' ||
-                                 *format == 'X')) {
-            zero = 0;                          /* for integers precision cancels the 0 flag */
-            if (prec == 0 && len == 1 && tmp[0] == '0') {
-                len = 0;                       /* %.0d of zero — nothing (as in C) */
-            } else if (prec > len) {
-                int z = prec - len;
-                if (z > (int)sizeof(tmp) - 2) z = (int)sizeof(tmp) - 2;
-                for (int i = len - 1; i >= 0; i--) tmp[i + z] = tmp[i];
-                for (int i = 0; i < z; i++) tmp[i] = '0';
-                len += z;
-            }
-        }
-
-        if (*format == 's' || *format == 'c') zero = 0;
-
-        /* # : for %o the leading zero is a digit, for %x/%X it is a prefix, and only
-           for a nonzero value (as in C).  Width is counted together with the prefix. */
-        char pfx[3] = {0};
-        int pfx_len = 0;
-        if (hash && *format == 'o' && len >= 0) {
-            int nonzero = 0;
-            for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
-            if (len == 0) { tmp[0] = '0'; len = 1; }
-            else if (nonzero && tmp[0] != '0' && len < (int)sizeof(tmp) - 1) {
-                for (int i = len - 1; i >= 0; i--) tmp[i + 1] = tmp[i];
-                tmp[0] = '0';
-                len++;
-            }
-        } else if (hash && (*format == 'x' || *format == 'X')) {
-            int nonzero = 0;
-            for (int i = 0; i < len; i++) if (tmp[i] != '0') { nonzero = 1; break; }
-            if (nonzero) {
-                pfx[0] = '0';
-                pfx[1] = (*format == 'X') ? 'X' : 'x';
-                pfx_len = 2;
-            }
-        }
-
-        if (neg) sign_len = 1;
-        int pad = width - (len + sign_len + pfx_len);
-        if (pad < 0) pad = 0;
-
-        if (minus) {
-            if (neg) _buf_putc(pp, pos, size, '-');
-            for (int i = 0; i < pfx_len; i++) _buf_putc(pp, pos, size, pfx[i]);
-        } else if (zero) {
-            if (neg) _buf_putc(pp, pos, size, '-');
-            for (int i = 0; i < pfx_len; i++) _buf_putc(pp, pos, size, pfx[i]);
-            while (pad-- > 0) _buf_putc(pp, pos, size, '0');
-        } else {
-            while (pad-- > 0) _buf_putc(pp, pos, size, ' ');
-            if (neg) _buf_putc(pp, pos, size, '-');
-            for (int i = 0; i < pfx_len; i++) _buf_putc(pp, pos, size, pfx[i]);
-        }
-
-        if (*format == 'c') {
-            _buf_putc(pp, pos, size, cval);
-        } else if (*format == 's') {
-            _buf_putn(pp, pos, size, sval, len);
-        } else {
-            _buf_putn(pp, pos, size, tmp, len);
-        }
-        if (minus) {
-            while (pad-- > 0) _buf_putc(pp, pos, size, ' ');
-        }
+static void _buf_sink_put(void *ctx, const char *s, size_t n) {
+    _buf_ctx_t *b = (_buf_ctx_t *)ctx;
+    for (size_t i = 0; i < n; i++) {
+        if (b->size > 0 && b->pos < b->size) b->dst[b->pos] = s[i];
+        b->pos++;
     }
 }
 
 int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
-    size_t pos = 0;
-    char *p = str;
-    if (size == 0) return 0;
-    _buf_vfmt(&p, &pos, size, format, ap);
-    if (pos < size) str[pos] = '\0';
-    else            str[size - 1] = '\0';
-    return (int)pos;
+    _buf_ctx_t b;
+    _fmt_out_t o;
+    b.dst   = str;
+    b.size  = size;
+    b.pos   = 0;
+    o.put   = _buf_sink_put;
+    o.ctx   = &b;
+    o.count = 0;
+    o.n     = 0;
+    _vfmt_core(&o, format, ap);
+    if (size > 0) str[b.pos < size ? b.pos : size - 1] = '\0';
+    return (int)b.pos;
 }
+
 
 int snprintf(char *str, size_t size, const char *format, ...) {
     va_list args;
@@ -921,6 +1060,54 @@ int sprintf(char *str, const char *format, ...) {
     va_list args;
     va_start(args, format);
     int ret = vsnprintf(str, (size_t)-1, format, args);
+    va_end(args);
+    return ret;
+}
+
+/* ── printf to a fresh buffer, and printf to a descriptor ───────────────── */
+
+int vasprintf(char **strp, const char *format, va_list ap) {
+    if (!strp) { errno = EINVAL; return -1; }
+
+    /* The length first (a size-0 call only counts), then one real pass. */
+    va_list probe;
+    va_copy(probe, ap);
+    int need = vsnprintf(0, 0, format, probe);
+    va_end(probe);
+    if (need < 0) { *strp = 0; return -1; }
+
+    char *buf = (char *)malloc((size_t)need + 1);
+    if (!buf) { *strp = 0; errno = ENOMEM; return -1; }
+
+    int got = vsnprintf(buf, (size_t)need + 1, format, ap);
+    if (got < 0) { free(buf); *strp = 0; return -1; }
+    *strp = buf;
+    return got;
+}
+
+int asprintf(char **strp, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int ret = vasprintf(strp, format, args);
+    va_end(args);
+    return ret;
+}
+
+int vdprintf(int fd, const char *format, va_list ap) {
+    /* The formatter only ever reads stream->fd, so a stack FILE is a complete
+     * sink for a descriptor. */
+    FILE f;
+    f.fd       = fd;
+    f.flags    = 0;
+    f.ungotten = 0;
+    f.buf[0]   = 0;
+    return vfprintf(&f, format, ap);
+}
+
+int dprintf(int fd, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int ret = vdprintf(fd, format, args);
     va_end(args);
     return ret;
 }

@@ -132,6 +132,20 @@ extern int opterr;
 extern int optopt;
 int getopt(int argc, char *const argv[], const char *optstring);
 
-#endif
-
 int isatty(int fd);
+
+/* ── system limits ── */
+int  getpagesize(void);
+
+#define _SC_ARG_MAX          0
+#define _SC_CHILD_MAX        1
+#define _SC_CLK_TCK          2
+#define _SC_OPEN_MAX         3
+#define _SC_PAGESIZE         4
+#define _SC_PAGE_SIZE        _SC_PAGESIZE
+#define _SC_NPROCESSORS_CONF 5
+#define _SC_NPROCESSORS_ONLN 6
+#define _SC_VERSION          7
+long sysconf(int name);
+
+#endif

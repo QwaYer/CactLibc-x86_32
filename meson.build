@@ -42,6 +42,7 @@ libc_includes = include_directories('include')
 
 subdir('src')
 subdir('ldso')
+subdir('tests')
 
 # ------------------------------------------------------------------------------
 # Published artifacts

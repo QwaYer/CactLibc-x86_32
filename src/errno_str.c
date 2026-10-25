@@ -1,4 +1,5 @@
 #include "stdio.h"
+#include "errno.h"
 
 static const char *const _err_map[134] = {
     [1]  = "Operation not permitted",
@@ -86,4 +87,20 @@ char *strerror(int errnum) {
     if (errnum >= 0 && errnum < 134 && _err_map[errnum])
         return (char *)_err_map[errnum];
     return "Unknown error";
+}
+
+/* XSI form: copy the message into buf and return 0, or ERANGE when it does not
+ * fit (the buffer then holds a truncated message). */
+int strerror_r(int errnum, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) return EINVAL;
+
+    const char *msg = strerror(errnum);
+    size_t n = 0;
+    while (msg[n]) n++;
+
+    size_t copy = (n < buflen - 1) ? n : buflen - 1;
+    for (size_t i = 0; i < copy; i++) buf[i] = msg[i];
+    buf[copy] = '\0';
+
+    return (copy == n) ? 0 : ERANGE;
 }

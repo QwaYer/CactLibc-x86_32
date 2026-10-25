@@ -7,6 +7,7 @@
 #include "stat.h"
 #include "errno.h"
 #include "random.h"
+#include "mman.h"
 #include <stdint.h>
 
 #define ATEXIT_MAX 32
@@ -95,14 +96,17 @@ int system(const char *command) {
 
 
 #define BLOCK_MAGIC 0xA110CA7E
+#define MMAP_MAGIC  0xA110CA7F      /* block lives in its own anonymous mapping */
 #define ALIGN8(x)  (((x) + 7) & ~7)
 #define BLOCK_SIZE  sizeof(struct block_header)
 
 struct block_header {
     unsigned int magic;
-    unsigned int size;
+    unsigned int size;             /* usable payload bytes */
     unsigned int is_free;
     struct block_header *next;
+    uintptr_t mbase;               /* MMAP_MAGIC only: the mapping's base */
+    unsigned int mlen;             /* MMAP_MAGIC only: the mapping's length */
 };
 
 static struct block_header *free_list = 0;
@@ -225,6 +229,10 @@ void free(void *ptr) {
     if (!ptr) return;
     struct block_header *block = (struct block_header *)
         ((char *)ptr - BLOCK_SIZE);
+    if (block->magic == MMAP_MAGIC) {
+        munmap((void *)block->mbase, block->mlen);
+        return;
+    }
     if (block->magic != BLOCK_MAGIC) return;
 
     malloc_lock_acquire();
@@ -242,6 +250,141 @@ void free(void *ptr) {
     malloc_lock_release();
 }
 
+/* ── aligned allocation ─────────────────────────────────────────────────────
+ * The free list is the *physical* chain of every block, so an aligned block
+ * cannot simply be cut out of the middle of another one: every byte has to
+ * belong to some block.  The aligned block is therefore carved as
+ *
+ *     [ leading fragment (free) ][ aligned block (used) ][ tail fragment (free) ]
+ *
+ * with the aligned block's header sitting immediately before its payload — the
+ * invariant free()/realloc() rely on.  A gap too small to host a fragment
+ * header is skipped by stepping the payload on by one more `align`; a tail too
+ * small to be a block is absorbed into the aligned block. */
+
+#define ALIGN_UP(v, a)   (((v) + ((uintptr_t)(a) - 1)) & ~((uintptr_t)(a) - 1))
+
+/* A huge alignment cannot be carved out of the brk arena without reserving
+ * several times the payload, so it is served from a private anonymous mapping
+ * instead.  The mapping's base and length ride in the block header and free()
+ * hands them back to munmap(). */
+static void *malloc_aligned_mmap(size_t size, size_t align) {
+    unsigned int need = (unsigned int)(size ? size : 1);
+    unsigned int page = (unsigned int)getpagesize();
+    size_t total = (size_t)need + align + BLOCK_SIZE;
+    total = (total + page - 1) & ~(size_t)(page - 1);
+
+    void *map = mmap(0, total, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED) { errno = ENOMEM; return 0; }
+
+    uintptr_t payload = ALIGN_UP((uintptr_t)map + BLOCK_SIZE, align);
+    struct block_header *h = (struct block_header *)(payload - BLOCK_SIZE);
+    h->magic   = MMAP_MAGIC;
+    h->size    = need;
+    h->is_free = 0;
+    h->next    = 0;
+    h->mbase   = (uintptr_t)map;
+    h->mlen    = (unsigned int)total;
+    return (void *)payload;
+}
+
+static void *malloc_aligned(size_t size, size_t alignment) {
+    unsigned int align = (unsigned int)alignment;
+    unsigned int need  = ALIGN8((unsigned int)(size ? size : 1));
+
+    /* Past a megabyte the brk arena would have to reserve several times the
+     * payload to position it, so take it from a mapping instead. */
+    if (align > (1u << 20)) return malloc_aligned_mmap(size, alignment);
+
+    malloc_lock_acquire();
+    heap_init();
+
+    /* Worst case: alignment slack (under 2*align, since a too-small gap is
+     * stepped over by one whole `align`), three headers, and the payload. */
+    unsigned int want = need + 2 * align + 2 * BLOCK_SIZE + 8;
+
+    struct block_header *block = free_list;
+    while (block && !(block->is_free && block->size >= want))
+        block = block->next;
+    if (!block) {
+        block = request_space(want);
+        if (!block) { malloc_lock_release(); return 0; }
+    }
+
+    char *base       = (char *)block;
+    uintptr_t bend   = (uintptr_t)base + BLOCK_SIZE + block->size;
+    uintptr_t astart = (uintptr_t)base + BLOCK_SIZE;
+
+    uintptr_t p = ALIGN_UP(astart, align);
+    if (p != astart && p - (uintptr_t)base < 2 * BLOCK_SIZE)
+        p += align;                     /* make room for a leading fragment header */
+
+    unsigned int lead = (unsigned int)(p - astart);         /* slack before the payload */
+    unsigned int used = need;
+    unsigned int tail = (unsigned int)(bend - (p + used));
+    if (tail < BLOCK_SIZE + 8) { used += tail; tail = 0; }  /* absorb a runt tail */
+
+    struct block_header *old_next = block->next;
+    struct block_header *aligned;
+
+    if (lead == 0) {
+        /* The original block's payload is already aligned: reuse its header. */
+        aligned = block;
+    } else {
+        aligned = (struct block_header *)(p - BLOCK_SIZE);
+        aligned->magic = BLOCK_MAGIC;
+
+        /* The original block becomes the leading fragment.  The chain head is
+         * untouched: the fragment is at the same address as `block`. */
+        block->size    = lead - BLOCK_SIZE;
+        block->is_free = 1;
+        block->next    = aligned;
+    }
+    aligned->size    = used;
+    aligned->is_free = 0;
+
+    if (tail) {
+        struct block_header *rest = (struct block_header *)(p + used);
+        rest->magic   = BLOCK_MAGIC;
+        rest->size    = tail - BLOCK_SIZE;
+        rest->is_free = 1;
+        rest->next    = old_next;
+        aligned->next = rest;
+    } else {
+        aligned->next = old_next;
+    }
+
+    malloc_lock_release();
+    return (void *)p;
+}
+
+int posix_memalign(void **memptr, size_t alignment, size_t size) {
+    if (!memptr) return EINVAL;
+    /* POSIX: a power of two, and a multiple of sizeof(void *). */
+    if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0)
+        return EINVAL;
+
+    void *p = (alignment <= 8) ? malloc(size) : malloc_aligned(size, alignment);
+    if (!p) return ENOMEM;
+    *memptr = p;
+    return 0;
+}
+
+void *aligned_alloc(size_t alignment, size_t size) {
+    if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0) {
+        errno = EINVAL;
+        return 0;
+    }
+    void *p = (alignment <= 8) ? malloc(size) : malloc_aligned(size, alignment);
+    if (!p) errno = ENOMEM;
+    return p;
+}
+
+void *memalign(size_t alignment, size_t size) {
+    return aligned_alloc(alignment, size);
+}
+
 void *calloc(size_t nmemb, size_t size) {
     size_t total = nmemb * size;
     void *ptr = malloc(total);
@@ -255,6 +398,15 @@ void *realloc(void *ptr, size_t size) {
 
     struct block_header *block = (struct block_header *)
         ((char *)ptr - BLOCK_SIZE);
+    if (block->magic == MMAP_MAGIC) {
+        /* Alignment need not survive realloc(): a plain block will do. */
+        void *np = malloc(size);
+        if (!np) return 0;
+        unsigned int n = (block->size < size) ? block->size : (unsigned int)size;
+        memcpy(np, ptr, n);
+        free(ptr);
+        return np;
+    }
     if (block->magic != BLOCK_MAGIC) return 0;
     if (block->size >= (unsigned int)size) return ptr;
 

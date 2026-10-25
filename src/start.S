@@ -27,6 +27,13 @@ _start:
     call    __cact_init_env@PLT
     addl    $16, %esp
 2:
+    /* Install this thread's static TLS block (__thread support) before any
+     * program code can touch a TLS variable: the compiler emits plain
+     * `%gs:...` accesses, so %gs has to be right already.  A program with no
+     * TLS has an empty layout and this returns immediately.  esp is still
+     * 16-byte aligned here, and a 0-argument call keeps it that way. */
+    call    __cact_tls_start@PLT
+
     movl    (%ebp),  %eax       /* argc */
     movl    4(%ebp), %ecx       /* argv */
     movl    8(%ebp), %edx       /* envp */

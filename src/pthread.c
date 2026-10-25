@@ -1,4 +1,7 @@
 #include "pthread.h"
+#include "futex.h"
+#include "thread_local.h"
+#include "tls_layout.h"
 #include "nodeio.h"
 #include "ioctl_abi.h"
 #include "unistd.h"
@@ -24,46 +27,13 @@
  *
  * Mutexes and condition variables are the usual futex algorithms over
  * CACT_PROCCTL_FUTEX: a lock word in user memory and a kernel wait/wake keyed
- * by (address space, address).
+ * by (address space, address).  The futex/control wrappers live in futex.c,
+ * shared with semaphore.c.
  */
-
-/* ── futex wrappers ─────────────────────────────────────────────────────── */
-
-/* One long-lived /proc/self/ctl fd for every thread.  Opening it per futex
- * operation would race on the shared fd table and churn descriptors. */
-static int ctl_fd = -1;
-
-static int ctl(unsigned long cmd, void *arg) {
-    int fd = ctl_fd;
-    if (fd < 0) {
-        fd = nio_open("/proc/self/ctl", O_RDWR);
-        if (fd < 0) return -1;
-        ctl_fd = fd;
-    }
-    return nio_ioctl(fd, cmd, arg);
-}
-
-static int futex_wait(volatile int *uaddr, int expected, int timeout_ms) {
-    cact_futex_arg_t a;
-    a.uaddr      = (uint32_t)(uintptr_t)uaddr;
-    a.op         = CACT_FUTEX_WAIT;
-    a.val        = expected;
-    a.timeout_ms = timeout_ms;
-    return ctl(CACT_PROCCTL_FUTEX, &a);   /* 0, -EAGAIN, -ETIMEDOUT, -EINTR */
-}
-
-static int futex_wake(volatile int *uaddr, int count) {
-    cact_futex_arg_t a;
-    a.uaddr      = (uint32_t)(uintptr_t)uaddr;
-    a.op         = CACT_FUTEX_WAKE;
-    a.val        = count;
-    a.timeout_ms = 0;
-    return ctl(CACT_PROCCTL_FUTEX, &a);
-}
 
 /* The calling thread's tid (kernel task id), via the cached ctl fd. */
 static uint32_t self_tid(void) {
-    int t = ctl(CACT_PROCCTL_GET_TID, 0);
+    int t = cact_ctl(CACT_PROCCTL_GET_TID, 0);
     return (t > 0) ? (uint32_t)t : (uint32_t)gettid();
 }
 
@@ -73,6 +43,7 @@ typedef struct cact_thread {
     struct cact_thread *self;
     uint32_t            id;        /* = pthread_t (kernel tid) */
     uint32_t            clr;       /* join word: kernel zeroes it on exit */
+    struct cact_tls     tls;       /* this thread's errno slot (thread_local.c) */
     int                 detached;
     int                 has_result;
     void               *retval;
@@ -154,7 +125,7 @@ static int mutex_lock_slow(pthread_mutex_t *m) {
             __atomic_compare_exchange_n((int *)&m->state, &c, 2, 0,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED);
         }
-        futex_wait(&m->state, 2, -1);   /* EAGAIN just means "try again" */
+        cact_futex_wait(&m->state, 2, -1);   /* EAGAIN just means "try again" */
     }
 }
 
@@ -222,7 +193,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
     }
 
     int old = __atomic_exchange_n((int *)&mutex->state, 0, __ATOMIC_RELEASE);
-    if (old == 2) futex_wake(&mutex->state, 1);
+    if (old == 2) cact_futex_wake(&mutex->state, 1);
     return 0;
 }
 
@@ -246,7 +217,7 @@ int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
     pthread_mutex_unlock(mutex);
     /* If a signal lands between the load and the wait, seq changed and the
      * wait returns -EAGAIN immediately. */
-    int r = futex_wait(&cond->seq, seq, -1);
+    int r = cact_futex_wait(&cond->seq, seq, -1);
     pthread_mutex_lock(mutex);
     if (r == -EINTR) return EINTR;
     return 0;
@@ -264,7 +235,7 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 
     int seq = __atomic_load_n((int *)&cond->seq, __ATOMIC_RELAXED);
     pthread_mutex_unlock(mutex);
-    int r = futex_wait(&cond->seq, seq, timeout);
+    int r = cact_futex_wait(&cond->seq, seq, timeout);
     pthread_mutex_lock(mutex);
 
     if (r == -ETIMEDOUT || (timeout == 0 && r == -EAGAIN))
@@ -275,14 +246,14 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 int pthread_cond_signal(pthread_cond_t *cond) {
     if (!cond) return EINVAL;
     __atomic_fetch_add((int *)&cond->seq, 1, __ATOMIC_RELEASE);
-    futex_wake(&cond->seq, 1);
+    cact_futex_wake(&cond->seq, 1);
     return 0;
 }
 
 int pthread_cond_broadcast(pthread_cond_t *cond) {
     if (!cond) return EINVAL;
     __atomic_fetch_add((int *)&cond->seq, 1, __ATOMIC_RELEASE);
-    futex_wake(&cond->seq, 0x7fffffff);
+    cact_futex_wake(&cond->seq, 0x7fffffff);
     return 0;
 }
 
@@ -299,12 +270,12 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         init_routine();
         __atomic_store_n((int *)&once_control->done, 2, __ATOMIC_RELEASE);
-        futex_wake(&once_control->done, 0x7fffffff);
+        cact_futex_wake(&once_control->done, 0x7fffffff);
         return 0;
     }
 
     while (__atomic_load_n((int *)&once_control->done, __ATOMIC_ACQUIRE) != 2)
-        futex_wait(&once_control->done, 1, -1);
+        cact_futex_wait(&once_control->done, 1, -1);
     return 0;
 }
 
@@ -367,7 +338,9 @@ int pthread_equal(pthread_t t1, pthread_t t2) {
 
 int pthread_attr_init(pthread_attr_t *attr) {
     if (!attr) return EINVAL;
-    attr->__x = 0;
+    attr->policy        = SCHED_OTHER;
+    attr->inheritsched  = PTHREAD_INHERIT_SCHED;
+    attr->param.sched_priority = 0;
     return 0;
 }
 
@@ -375,6 +348,93 @@ int pthread_attr_destroy(pthread_attr_t *attr) {
     (void)attr;
     return 0;
 }
+
+int pthread_attr_setinheritsched(pthread_attr_t *attr, int inheritsched) {
+    if (!attr) return EINVAL;
+    if (inheritsched != PTHREAD_INHERIT_SCHED && inheritsched != PTHREAD_EXPLICIT_SCHED)
+        return EINVAL;
+    attr->inheritsched = inheritsched;
+    return 0;
+}
+
+int pthread_attr_getinheritsched(const pthread_attr_t *attr, int *inheritsched) {
+    if (!attr || !inheritsched) return EINVAL;
+    *inheritsched = attr->inheritsched;
+    return 0;
+}
+
+int pthread_attr_setschedpolicy(pthread_attr_t *attr, int policy) {
+    if (!attr) return EINVAL;
+    attr->policy = policy;              /* refused at create, which POSIX allows */
+    return 0;
+}
+
+int pthread_attr_getschedpolicy(const pthread_attr_t *attr, int *policy) {
+    if (!attr || !policy) return EINVAL;
+    *policy = attr->policy;
+    return 0;
+}
+
+int pthread_attr_setschedparam(pthread_attr_t *attr, const struct sched_param *param) {
+    if (!attr || !param) return EINVAL;
+    attr->param = *param;
+    return 0;
+}
+
+int pthread_attr_getschedparam(const pthread_attr_t *attr, struct sched_param *param) {
+    if (!attr || !param) return EINVAL;
+    *param = attr->param;
+    return 0;
+}
+
+int pthread_attr_setscope(pthread_attr_t *attr, int scope) {
+    if (!attr) return EINVAL;
+    /* One scope exists: every thread is a kernel task (PTHREAD_SCOPE_SYSTEM). */
+    return (scope == PTHREAD_SCOPE_SYSTEM) ? 0 : EINVAL;
+}
+
+int pthread_attr_getscope(const pthread_attr_t *attr, int *scope) {
+    if (!attr || !scope) return EINVAL;
+    *scope = PTHREAD_SCOPE_SYSTEM;
+    return 0;
+}
+
+/* ── the scheduling API for a running thread ────────────────────────────────
+ *
+ * Every thread is in the one class the MLFQ has, so these can only validate and
+ * answer; a policy or priority outside SCHED_OTHER/0 cannot be honoured and is
+ * refused with EINVAL (see <sched.h>).  A thread the registry does not know is
+ * ESRCH, as POSIX asks. */
+
+static int thread_known(pthread_t t) {
+    int found;
+    if (t == 0 || t == (pthread_t)self_tid()) return 1;
+    pthread_mutex_lock(&g_lock);
+    found = find_by_id_locked((uint32_t)t) != 0;
+    pthread_mutex_unlock(&g_lock);
+    return found;
+}
+
+int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param *param) {
+    if (policy != SCHED_OTHER) return EINVAL;
+    if (!param || param->sched_priority != 0) return EINVAL;
+    return thread_known(thread) ? 0 : ESRCH;
+}
+
+int pthread_getschedparam(pthread_t thread, int *policy, struct sched_param *param) {
+    if (!policy || !param) return EINVAL;
+    if (!thread_known(thread)) return ESRCH;
+    *policy = SCHED_OTHER;
+    param->sched_priority = 0;
+    return 0;
+}
+
+int pthread_setschedprio(pthread_t thread, int prio) {
+    if (prio != 0) return EINVAL;           /* SCHED_OTHER has no priority */
+    return thread_known(thread) ? 0 : ESRCH;
+}
+
+/* pthread_atfork() lives in src/atfork.c. */
 
 #define DEFAULT_STACK_SIZE (1024u * 1024u)
 
@@ -385,7 +445,14 @@ extern void __cact_thread_exit_stub(void);
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg) {
     if (!thread || !start_routine) return EINVAL;
-    (void)attr;
+    if (attr && attr->inheritsched == PTHREAD_EXPLICIT_SCHED) {
+        /* POSIX applies the sched attributes only under EXPLICIT_SCHED, and the
+         * one class this scheduler has is SCHED_OTHER (priority 0).  Anything
+         * else cannot be honoured, so the create fails instead of starting the
+         * thread in a class it was not asked for. */
+        if (attr->policy != SCHED_OTHER || attr->param.sched_priority != 0)
+            return EINVAL;
+    }
 
     /* Seed the process pid from the leader before any worker exists. */
     __cact_pid_init();
@@ -414,19 +481,29 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     a.entry           = (void *)start_routine;
     a.user_esp        = (uint32_t)(uintptr_t)sp;
     a.flags           = 0;
-    a.tls             = 0;
+    /* The thread's %gs base: a freshly built static TLS block (the same image
+     * every thread starts from, with its own .tbss).  A layout ld.so published
+     * always has the reserve in it, so this is a real block; the kernel reads 0
+     * as "leave %gs alone", which only an empty layout produces.  errno also
+     * finds its slot by stack range (thread_local.c). */
+    a.tls             = (uint32_t)(uintptr_t)cact_tls_block_new();
     a.set_child_tid   = (uint32_t)(uintptr_t)&td->id;   /* kernel writes the tid */
     a.clear_child_tid = (uint32_t)(uintptr_t)&td->clr;  /* kernel zeroes on exit */
 
     /* Register before the kernel starts the thread, so the new thread can find
-     * its own descriptor by tid as soon as it runs. */
+     * its own descriptor by tid as soon as it runs.  The stack range is
+     * registered at the same time: it is what identifies the thread for its
+     * own errno slot (thread_local.c). */
+    cact_tlocal_register(stack, DEFAULT_STACK_SIZE, &td->tls);
+
     pthread_mutex_lock(&g_lock);
     td->next  = g_threads;
     g_threads = td;
     pthread_mutex_unlock(&g_lock);
 
-    int tid = ctl(CACT_PROCCTL_THREAD_CREATE, &a);
+    int tid = cact_ctl(CACT_PROCCTL_THREAD_CREATE, &a);
     if (tid <= 0) {
+        cact_tlocal_unregister(&td->tls);
         pthread_mutex_lock(&g_lock);
         cact_thread_t **pp = &g_threads;
         while (*pp && *pp != td) pp = &(*pp)->next;
@@ -480,8 +557,9 @@ void __cact_thread_exit_body(void *retval) {
 
     /* The kernel zeroes &td->clr and futex-wakes anyone joined on it, then
      * never lets this thread run again. */
+    if (td) cact_tlocal_unregister(&td->tls);
     uint32_t code = 0;
-    ctl(CACT_PROCCTL_THREAD_EXIT, &code);
+    cact_ctl(CACT_PROCCTL_THREAD_EXIT, &code);
 
     /* Not reached; if it somehow is, end the process rather than spin. */
     _exit(0);
@@ -499,7 +577,7 @@ int pthread_join(pthread_t thread, void **retval) {
     while (__atomic_load_n((int *)&td->clr, __ATOMIC_ACQUIRE) != 0) {
         int cur = (int)__atomic_load_n((int *)&td->clr, __ATOMIC_RELAXED);
         if (cur == 0) break;
-        int r = futex_wait((volatile int *)&td->clr, cur, -1);
+        int r = cact_futex_wait((volatile int *)&td->clr, cur, -1);
         if (r == -EINTR) return EINTR;   /* let a pending signal terminate */
     }
 
@@ -513,6 +591,9 @@ int pthread_join(pthread_t thread, void **retval) {
 
     void *stack = td->stack;
     size_t ssize = td->stack_size;
+    /* Each thread unregisters on its own way out; this covers a thread killed
+     * by a signal, which never reached __cact_thread_exit_body. */
+    cact_tlocal_unregister(&td->tls);
     free(td);
     if (stack) munmap(stack, ssize);
     return 0;

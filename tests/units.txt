@@ -1,0 +1,26 @@
+# One line per host test unit:
+#   "<unit> <test-main> <sources...> [link flags...]"
+#     <unit>          selects tests/host/rename_<unit>.h, pre-included in every
+#                     source of the unit
+#     <test-main>     tests/host/<test-main>.c, the main() that runs the checks
+#     <sources...>    src/<source>.c, the shipped code under test
+#     -flags          anything starting with '-' is added to the link line
+# run-host.sh reads this, so a new unit is added in exactly one place.
+stdio printf_test.c stdio.c
+math math_test.c math.c -lm
+wordexp wordexp_test.c wordexp.c
+time time_test.c time.c tz.c
+thread_local thread_local_test.c thread_local.c
+signal signal_test.c signal.c
+tz tz_test.c tz.c
+tls tls_test.c tls_static.c
+semaphore semaphore_test.c semaphore.c futex.c
+dlfcn dlfcn_test.c dlfcn.c thread_local.c tls_static.c
+strftime strftime_test.c strftime.c tz.c time.c
+glob glob_test.c glob.c
+sched sched_test.c sched.c
+spawn spawn_test.c spawn.c sched.c
+atfork atfork_test.c atfork.c
+pthread pthread_test.c pthread.c futex.c thread_local.c tls_static.c
+shm_open shm_open_test.c shm_open.c
+mqueue mqueue_test.c mqueue.c

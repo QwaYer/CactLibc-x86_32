@@ -1,6 +1,8 @@
 #ifndef _TIME_H
 #define _TIME_H
 
+#include <stddef.h>
+
 typedef long time_t;
 
 struct tm {
@@ -41,6 +43,15 @@ struct itimerspec {
 
 time_t time(time_t *t);
 double difftime(time_t time1, time_t time0);
+
+/* Timezone: `TZ` is a POSIX TZ string (`std offset [dst [offset][,start,end]]`).
+ * An empty or zone-file name (one containing '/') has no database to read here
+ * and falls back to UTC.  tzset() is called implicitly by the functions below. */
+void tzset(void);
+extern char *tzname[2];
+extern long timezone;   /* seconds west of UTC, standard time */
+extern int  daylight;   /* nonzero when DST is ever used */
+
 struct tm *gmtime(const time_t *timep);
 struct tm *gmtime_r(const time_t *timep, struct tm *result);
 struct tm *localtime(const time_t *timep);
@@ -52,6 +63,20 @@ char *ctime(const time_t *timep);
 char *ctime_r(const time_t *timep, char *buf);
 int gettimeofday(struct timeval *tv, void *tz);
 int clock_gettime(int clkid, struct timespec *tp);
+/* Sets the wall clock (CLOCK_REALTIME only) through the kernel's
+ * /dev/sys CACT_SYSCTL_SETWALLCLOCK; needs root. */
+int clock_settime(int clkid, const struct timespec *tp);
+/* clock_getres reports the kernel's timer resolution (1 ms). */
+int clock_getres(int clkid, struct timespec *res);
 int nanosleep(const struct timespec *req, struct timespec *rem);
+/* The clock-taking sleep: like nanosleep(), but on the named clock, optionally
+ * to an absolute deadline (TIMER_ABSTIME), and it returns the error number
+ * itself (POSIX) rather than -1/errno. */
+int clock_nanosleep(int clkid, int flags, const struct timespec *req,
+                    struct timespec *rem);
+
+/* C locale, and the zone is UTC (localtime() == gmtime()). */
+size_t strftime(char *s, size_t max, const char *format, const struct tm *tm);
+char  *strptime(const char *s, const char *format, struct tm *tm);
 
 #endif

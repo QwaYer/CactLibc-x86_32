@@ -33,6 +33,19 @@ typedef struct {
     u32         symcount;
     char*       strtab;
     u32         strsz;
+    /* PT_TLS (all zero when the object has no TLS) */
+    u32         tls_vaddr, tls_filesz, tls_memsz, tls_align;
+    u32         tls_off;   /* its offset in the static block (see tls_publish) */
+    u32         tls_modid; /* its TLS module id (for general-dynamic relocations) */
+    /* a copy of its program headers (the ELF header is not mapped, so they are
+     * not readable after the fact) and the phdr count */
+    u32         phdr, phnum;
+    /* the span the PT_LOADs cover, so a later dlopen() can refuse to map over it */
+    u32         base, size;
+    /* The relocation sections, kept so the TLS pass can re-walk them once
+     * every object is loaded and the block layout is known. */
+    Elf32_Rel*  rel;  u32 rel_sz,  rel_ent;
+    Elf32_Rela* rela; u32 rela_sz, rela_ent;
 } ldobj_t;
 
 /* Raw syscall shim.  ABI: EAX=num, EBX=a1, ESI=a2, EDI=a3 (SYSENTER). */
@@ -99,6 +112,12 @@ static void ld_dbg(const char* s)
 
 static ldobj_t g_objs[LDSO_MAX_OBJS];
 static int     g_nobj;
+
+/* Program headers, copied out of the file scratch buffer as each object is
+ * loaded: a CactOS image's ELF header is not mapped (its first PT_LOAD starts
+ * at file offset 0x1000), so dl_iterate_phdr has nothing else to point at. */
+#define DL_MAX_PHDRS CACT_DL_MAX_PHDRS
+static Elf32_Phdr g_phdrs[LDSO_MAX_OBJS * DL_MAX_PHDRS];
 
 static ldobj_t* obj_find_by_name(const char* name)
 {
@@ -320,6 +339,8 @@ static void process_object(ldobj_t* ob)
     ob->strtab    = strtab;
     ob->strsz     = strsz;
     ob->symcount  = symcount_from_hash(hash, gnu_hash, symtab);
+    ob->rel       = rel;  ob->rel_sz  = rel_sz;  ob->rel_ent  = rel_ent;
+    ob->rela      = rela; ob->rela_sz = rela_sz; ob->rela_ent = rela_ent;
 
     /* dependencies (their relocations run first, kernel order) */
     for (i = 0; i < nneed; i++) {
@@ -395,6 +416,8 @@ static int load_library(const char* name)
     int  i;
     Elf32_Dyn* dyn = 0;
     u32        dynsz = 0;
+    u32        tls_vaddr = 0, tls_filesz = 0, tls_memsz = 0, tls_align = 4;
+    u32        span_lo = 0, span_hi = 0;
 
     if (g_nobj >= LDSO_MAX_OBJS) return -1;
 
@@ -435,7 +458,20 @@ static int load_library(const char* name)
     /* two passes: map PT_LOAD, remember PT_DYNAMIC */
     for (i = 0; i < phnum; i++) {
         Elf32_Phdr* ph = (Elf32_Phdr*)(buf + phoff + (u32)i * phentsz);
+        if (ph->p_type == PT_TLS) {
+            tls_vaddr = ph->p_vaddr;
+            tls_filesz = ph->p_filesz;
+            tls_memsz  = ph->p_memsz;
+            tls_align  = ph->p_align;
+            continue;
+        }
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0) continue;
+        {
+            u32 lo = ph->p_vaddr & ~0xFFFu;
+            u32 hi = (ph->p_vaddr + ph->p_memsz + 0xFFFu) & ~0xFFFu;
+            if (!span_lo || lo < span_lo) span_lo = lo;
+            if (hi > span_hi) span_hi = hi;
+        }
         if (!map_segment(ph->p_vaddr, ph->p_memsz)) {
             ldso_sc(SYS_MUNMAP, (unsigned)buf, cap, 0);
             ld_dbg("[ld.so] mmap segment failed: "); ld_dbg(path); ld_dbg("\n");
@@ -458,6 +494,18 @@ static int load_library(const char* name)
                   buf + ph->p_offset, ph->p_filesz);
     }
 
+    /* Keep a copy of the program headers while the scratch buffer is still
+     * there: the ELF header of a CactOS image is not mapped (its first PT_LOAD
+     * starts at file offset 0x1000), so dl_iterate_phdr has nothing else to
+     * point a caller at.  The slot is the index this object is about to take. */
+    if (g_nobj < LDSO_MAX_OBJS) {
+        u32 n = phnum < DL_MAX_PHDRS ? phnum : DL_MAX_PHDRS;
+        u32 slot = (u32)g_nobj;
+        for (i = 0; i < (int)n; i++)
+            ld_memcpy(&g_phdrs[slot * DL_MAX_PHDRS + i],
+                      buf + phoff + (u32)i * phentsz, sizeof(Elf32_Phdr));
+    }
+
     ldso_sc(SYS_MUNMAP, (unsigned)buf, cap, 0);
 
     if (g_nobj < LDSO_MAX_OBJS) {
@@ -466,6 +514,15 @@ static int load_library(const char* name)
         ob->dyn    = (u32)dyn;
         ob->dynsz  = dynsz;
         ob->symtab = 0; ob->strtab = 0; ob->strsz = 0; ob->symcount = 0;
+        ob->rel = 0; ob->rel_sz = 0; ob->rel_ent = 0;
+        ob->rela = 0; ob->rela_sz = 0; ob->rela_ent = 0;
+        ob->tls_vaddr = tls_vaddr; ob->tls_filesz = tls_filesz;
+        ob->tls_memsz = tls_memsz; ob->tls_align  = tls_align;
+        ob->tls_off   = 0;
+        ob->base      = span_lo;
+        ob->size      = span_hi - span_lo;
+        ob->phdr      = (u32)&g_phdrs[(u32)(g_nobj - 1) * DL_MAX_PHDRS];
+        ob->phnum     = phnum < DL_MAX_PHDRS ? phnum : DL_MAX_PHDRS;
         process_object(ob);
         return 0;
     }
@@ -508,6 +565,178 @@ static int parse_auxv(u32* stackp, auxv_t* av)
     return (av->phdr && av->phnum && av->phent) ? 0 : -1;
 }
 
+/* ── static TLS ──────────────────────────────────────────────────────────── */
+
+static u32 g_tls_total;
+
+/* One module per object that carries a PT_TLS, in load order, and hand the
+ * resulting layout to the libc — the libc cannot see the program headers, and
+ * it is the one that builds each thread's block (src/tls_static.c). */
+static void tls_publish(void)
+{
+    cact_tls_layout_t lay;
+    int i, n = 0;
+    u32 addr;
+
+    ld_memset(&lay, 0, sizeof(lay));
+    for (i = 0; i < g_nobj && n < CACT_TLS_MAX_MODULES; i++) {
+        ldobj_t* ob = &g_objs[i];
+        ob->tls_off = 0;
+        ob->tls_modid = 0;
+        if (!ob->tls_memsz) continue;
+        lay.mods[n].off    = 0;
+        lay.mods[n].vaddr  = ob->tls_vaddr;
+        lay.mods[n].filesz = ob->tls_filesz;
+        lay.mods[n].memsz  = ob->tls_memsz;
+        lay.mods[n].align  = ob->tls_align;
+        n++;
+    }
+    /* Room for the objects that will show up later: a dlopen()'d plugin's own
+     * __thread has to land inside every thread's block, and the block is made
+     * once, before _start.  It is published even when nothing here uses
+     * __thread, so a program with none of its own still has %gs pointing at a
+     * block the moment it loads something that does. */
+    g_tls_total = cact_tls_plan_reserved(&lay, (u32)n, CACT_TLS_RESERVE);
+
+    /* the same walk, so each object learns its own offset and module id */
+    n = 0;
+    for (i = 0; i < g_nobj && n < CACT_TLS_MAX_MODULES; i++) {
+        if (!g_objs[i].tls_memsz) continue;
+        g_objs[i].tls_off   = lay.mods[n].off;
+        g_objs[i].tls_modid = lay.mods[n].id;
+        n++;
+    }
+
+    addr = resolve_symbol("cact_tls_layout");
+    if (addr) ld_memcpy((void*)addr, &lay, sizeof(lay));
+    else ld_dbg("[ld.so] libc has no cact_tls_layout\n");
+}
+
+/* Resolve what the linker left: after linking, static TLS access to a variable
+ * is an R_386_TLS_TPOFF against a symbol whose st_value is its offset within
+ * its module's TLS image, and the displacement to store is the distance from
+ * the thread pointer (the TCB, which sits just past the block) down to the
+ * variable.  GNU ld reduces both the program's own local-exec access and a
+ * library's initial-exec access to this one relocation, so there is a single
+ * case here.  General-dynamic is the pair R_386_TLS_DTPMOD32/_DTPOFF32 (the
+ * module id and the offset ___tls_get_addr() adds), which only a shared object
+ * that is not initial-exec emits; the rest name a model this ld.so does not
+ * implement, so they are reported rather than silently left unresolved. */
+static void tls_relocate(void)
+{
+    int i;
+
+    for (i = 0; i < g_nobj; i++) {
+        ldobj_t* ob = &g_objs[i];
+        u32 j, n;
+
+        if (ob->rel && ob->rel_sz && ob->rel_ent) {
+            n = ob->rel_sz / ob->rel_ent;
+            for (j = 0; j < n; j++) {
+                Elf32_Rel* r = (Elf32_Rel*)((u8*)ob->rel + j * ob->rel_ent);
+                u8 t = (u8)ELF32_R_TYPE(r->r_info);
+                u32 si = ELF32_R_SYM(r->r_info);
+                u32* target = (u32*)r->r_offset;
+                u32 S = 0;
+
+                if (t == R_386_TLS_TPOFF || t == R_386_TLS_TPOFF32) {
+                    if (si && si < ob->symcount) S = ob->symtab[si].st_value;
+                    *target = ob->tls_off + S + *target - g_tls_total;
+                    continue;
+                }
+                if (t == R_386_TLS_DTPMOD32) {
+                    /* General-dynamic's module-id half: the defining object's
+                     * TLS id.  The program is -fPIE (local-exec) and no startup
+                     * library carries __thread, so this only matters to an
+                     * object that is neither — the same "assume it is the
+                     * object's own symbol" rule the TPOFF case above uses. */
+                    if (!ob->tls_memsz) {
+                        ld_dbg("[ld.so] unsupported TLS relocation\n");
+                        continue;
+                    }
+                    *target = ob->tls_modid + *target;
+                    continue;
+                }
+                if (t == R_386_TLS_DTPOFF32) {
+                    if (si && si < ob->symcount) S = ob->symtab[si].st_value;
+                    *target = S + *target;
+                    continue;
+                }
+                if (t >= R_386_TLS_TPOFF && t <= R_386_TLS_TPOFF32)
+                    ld_dbg("[ld.so] unsupported TLS relocation\n");
+            }
+        }
+        if (ob->rela && ob->rela_sz && ob->rela_ent) {
+            n = ob->rela_sz / ob->rela_ent;
+            for (j = 0; j < n; j++) {
+                Elf32_Rela* r = (Elf32_Rela*)((u8*)ob->rela + j * ob->rela_ent);
+                u8 t = (u8)ELF32_R_TYPE(r->r_info);
+                u32 si = ELF32_R_SYM(r->r_info);
+                u32* target = (u32*)r->r_offset;
+                u32 S = 0;
+
+                if (t == R_386_TLS_TPOFF || t == R_386_TLS_TPOFF32) {
+                    if (si && si < ob->symcount) S = ob->symtab[si].st_value;
+                    *target = ob->tls_off + S + (u32)r->r_addend - g_tls_total;
+                    continue;
+                }
+                if (t == R_386_TLS_DTPMOD32) {
+                    if (!ob->tls_memsz) {
+                        ld_dbg("[ld.so] unsupported TLS relocation\n");
+                        continue;
+                    }
+                    *target = ob->tls_modid + (u32)r->r_addend;
+                    continue;
+                }
+                if (t == R_386_TLS_DTPOFF32) {
+                    if (si && si < ob->symcount) S = ob->symtab[si].st_value;
+                    *target = S + (u32)r->r_addend;
+                    continue;
+                }
+                if (t >= R_386_TLS_TPOFF && t <= R_386_TLS_TPOFF32)
+                    ld_dbg("[ld.so] unsupported TLS relocation\n");
+            }
+        }
+    }
+}
+
+/* Hand the libc the list of objects already mapped, so dlopen() can reuse them
+ * (clibc.so above all: every plugin's DT_NEEDED names it) and can refuse to map
+ * a new object over one of them.  Pinned: dlclose() never unloads these. */
+static void dl_publish(void)
+{
+    cact_dl_table_t t;
+    u32 addr = resolve_symbol("cact_dl_table");
+    int i;
+
+    if (!addr) {
+        ld_dbg("[ld.so] libc has no cact_dl_table\n");
+        return;
+    }
+    t.count = 0;
+    for (i = 0; i < g_nobj && t.count < CACT_DL_MAX_OBJECTS; i++) {
+        ldobj_t* ob = &g_objs[i];
+        cact_dl_object_t* o = &t.objs[t.count];
+        o->name     = ob->name;
+        o->dyn      = ob->dyn;
+        o->dynsz    = ob->dynsz;
+        o->symtab   = (u32)ob->symtab;
+        o->strtab   = (u32)ob->strtab;
+        o->symcount = ob->symcount;
+        o->strsz    = ob->strsz;
+        o->phdr     = ob->phdr;
+        o->phnum    = ob->phnum;
+        o->base     = ob->base;
+        o->size     = ob->size;
+        o->flags    = CACT_DL_PINNED;
+        o->refs     = 1;
+        o->tls_off  = ob->tls_memsz ? ob->tls_off : CACT_DL_NO_TLS;
+        o->tls_modid = ob->tls_memsz ? ob->tls_modid : 0;
+        t.count++;
+    }
+    ld_memcpy((void*)addr, &t, sizeof(t));
+}
+
 /* ── entry ───────────────────────────────────────────────────────────── */
 
 u32 ldso_entry(u32* stackp)
@@ -515,6 +744,8 @@ u32 ldso_entry(u32* stackp)
     auxv_t   av;
     Elf32_Phdr* ph;
     u32      main_dyn = 0, main_dynsz = 0;
+    u32      main_tls_vaddr = 0, main_tls_filesz = 0, main_tls_memsz = 0, main_tls_align = 4;
+    u32      main_lo = 0, main_hi = 0;
     ldobj_t* mainobj;
     u32      i;
 
@@ -523,13 +754,22 @@ u32 ldso_entry(u32* stackp)
         return 0;
     }
 
-    /* find main's PT_DYNAMIC via the mapped phdr table */
+    /* find main's PT_DYNAMIC (and PT_TLS) via the mapped phdr table */
     for (i = 0; i < av.phnum; i++) {
         ph = (Elf32_Phdr*)(av.phdr + i * av.phent);
         if (ph->p_type == PT_DYNAMIC) {
             main_dyn   = ph->p_vaddr;
             main_dynsz = ph->p_filesz;
-            break;
+        } else if (ph->p_type == PT_TLS) {
+            main_tls_vaddr  = ph->p_vaddr;
+            main_tls_filesz = ph->p_filesz;
+            main_tls_memsz  = ph->p_memsz;
+            main_tls_align  = ph->p_align;
+        } else if (ph->p_type == PT_LOAD && ph->p_memsz) {
+            u32 lo = ph->p_vaddr & ~0xFFFu;
+            u32 hi = (ph->p_vaddr + ph->p_memsz + 0xFFFu) & ~0xFFFu;
+            if (!main_lo || lo < main_lo) main_lo = lo;
+            if (hi > main_hi) main_hi = hi;
         }
     }
     if (!main_dyn) {
@@ -542,8 +782,32 @@ u32 ldso_entry(u32* stackp)
     mainobj->dyn    = main_dyn;
     mainobj->dynsz  = main_dynsz;
     mainobj->symtab = 0; mainobj->strtab = 0; mainobj->strsz = 0; mainobj->symcount = 0;
+    mainobj->rel = 0; mainobj->rel_sz = 0; mainobj->rel_ent = 0;
+    mainobj->rela = 0; mainobj->rela_sz = 0; mainobj->rela_ent = 0;
+    mainobj->tls_vaddr = main_tls_vaddr; mainobj->tls_filesz = main_tls_filesz;
+    mainobj->tls_memsz = main_tls_memsz; mainobj->tls_align  = main_tls_align;
+    mainobj->tls_off   = 0;
+    mainobj->base      = main_lo;
+    mainobj->size      = main_hi - main_lo;
+    /* The main's phdrs *are* mapped (AT_PHDR), so copy them out of there. */
+    {
+        u32 n = av.phnum < DL_MAX_PHDRS ? av.phnum : DL_MAX_PHDRS;
+        for (i = 0; i < n; i++)
+            ld_memcpy(&g_phdrs[i], (void*)(av.phdr + i * av.phent), sizeof(Elf32_Phdr));
+        mainobj->phdr  = (u32)&g_phdrs[0];
+        mainobj->phnum = n;
+    }
 
     process_object(mainobj);
+
+    /* Every object is loaded now, so the static TLS block can be laid out and
+     * the TLS relocations (which depend on its total size) resolved.  Both are
+     * no-ops when nothing in the program uses __thread. */
+    tls_publish();
+    tls_relocate();
+
+    /* What dlopen() has to know about the image it is starting inside. */
+    dl_publish();
 
     return av.entry;
 }

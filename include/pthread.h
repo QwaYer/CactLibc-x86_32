@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <time.h>
+#include "sched.h"           /* struct sched_param, SCHED_OTHER */
 
 /*
  * POSIX threads for CactOS.
@@ -36,9 +37,20 @@ typedef struct {
 
 typedef uint32_t pthread_key_t;
 
-typedef struct { uint32_t __x; } pthread_attr_t;
 typedef struct { uint32_t __x; } pthread_mutexattr_t;
 typedef struct { uint32_t __x; } pthread_condattr_t;
+
+/* The scheduling half of a thread attribute.  POSIX starts a new thread with
+ * INHERIT_SCHED, so policy/param below only take effect once
+ * pthread_attr_setinheritsched(attr, PTHREAD_EXPLICIT_SCHED) is called — and
+ * then only SCHED_OTHER (priority 0) can be honoured, because that is the one
+ * class the MLFQ has; pthread_create() reports EINVAL for anything else rather
+ * than silently starting the thread in the wrong class (see <sched.h>). */
+typedef struct {
+    int                policy;
+    int                inheritsched;
+    struct sched_param param;
+} pthread_attr_t;
 
 #define PTHREAD_MUTEX_INITIALIZER  { 0, 0, 0, 0 }
 #define PTHREAD_COND_INITIALIZER   { 0 }
@@ -54,6 +66,12 @@ typedef struct { uint32_t __x; } pthread_condattr_t;
 
 #define PTHREAD_CREATE_JOINABLE 0
 #define PTHREAD_CREATE_DETACHED 1
+
+#define PTHREAD_INHERIT_SCHED   0
+#define PTHREAD_EXPLICIT_SCHED  1
+
+#define PTHREAD_SCOPE_SYSTEM    0   /* kernel threads: the only scope there is */
+#define PTHREAD_SCOPE_PROCESS   1
 
 int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
 int pthread_mutex_destroy(pthread_mutex_t *mutex);
@@ -86,5 +104,28 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 void pthread_exit(void *retval) __attribute__((noreturn));
 int pthread_join(pthread_t thread, void **retval);
 int pthread_detach(pthread_t thread);
+
+/* The scheduling attributes (see the comment on pthread_attr_t). */
+int pthread_attr_setinheritsched(pthread_attr_t *attr, int inheritsched);
+int pthread_attr_getinheritsched(const pthread_attr_t *attr, int *inheritsched);
+int pthread_attr_setschedpolicy(pthread_attr_t *attr, int policy);
+int pthread_attr_getschedpolicy(const pthread_attr_t *attr, int *policy);
+int pthread_attr_setschedparam(pthread_attr_t *attr, const struct sched_param *param);
+int pthread_attr_getschedparam(const pthread_attr_t *attr, struct sched_param *param);
+int pthread_attr_setscope(pthread_attr_t *attr, int scope);
+int pthread_attr_getscope(const pthread_attr_t *attr, int *scope);
+
+int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param *param);
+int pthread_getschedparam(pthread_t thread, int *policy, struct sched_param *param);
+int pthread_setschedprio(pthread_t thread, int prio);
+
+/* fork() handlers.  Called in POSIX's order: every prepare in reverse
+ * registration order, then every parent/child in order. */
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
+
+/* Internal: the hooks fork() (src/unistd.c) calls around the trap. */
+void __cact_atfork_prepare(void);
+void __cact_atfork_parent(void);
+void __cact_atfork_child(void);
 
 #endif /* _PTHREAD_H */

@@ -39,7 +39,12 @@ intptr_t syscall(int num, uintptr_t p1, uintptr_t p2, uintptr_t p3);
  *   ESI = arg2          (ECX is stolen by the CPU as return-ESP)
  *   EDI = arg3          (EDX is stolen by the CPU as return-EIP)
  * Return value in EAX.
+ *
+ * The i686 target goes through sysenter.  The libc test suite also compiles
+ * these units for the build machine, where that instruction does not exist and
+ * no kernel is behind it, so stub definitions stand in below.
  */
+#if defined(__i386__)
 static inline intptr_t __syscall0(int num) {
     intptr_t ret;
     __asm__ volatile (
@@ -107,5 +112,13 @@ static inline intptr_t __syscall3(int num, uintptr_t a1, uintptr_t a2, uintptr_t
     );
     return ret;
 }
+#else
+static inline intptr_t __syscall0(int num) { (void)num; return -1; }
+static inline intptr_t __syscall1(int num, uintptr_t a1) { (void)num; (void)a1; return -1; }
+static inline intptr_t __syscall2(int num, uintptr_t a1, uintptr_t a2)
+    { (void)num; (void)a1; (void)a2; return -1; }
+static inline intptr_t __syscall3(int num, uintptr_t a1, uintptr_t a2, uintptr_t a3)
+    { (void)num; (void)a1; (void)a2; (void)a3; return -1; }
+#endif
 
 #endif

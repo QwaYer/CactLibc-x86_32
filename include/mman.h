@@ -2,6 +2,7 @@
 #define _SYS_MMAN_H
 
 #include <stddef.h>
+#include "unistd.h"   /* mode_t for shm_open() */
 
 #define PROT_NONE   0x0
 #define PROT_READ   0x1
@@ -25,5 +26,13 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, unsigned int 
 int   munmap(void *addr, size_t length);
 int   mprotect(void *addr, size_t length, int prot);
 int   msync(void *addr, size_t length, int flags);
+
+/* POSIX shared memory — the /dev/shm name space.  A name is "/" plus one
+ * component with no further slash (EINVAL otherwise); the descriptor the call
+ * returns is an ordinary file descriptor on a tmpfs object, so ftruncate(),
+ * read()/write() and a MAP_SHARED mmap() all work on it, and shm_unlink()
+ * removes the name while an already-mapped object stays alive. */
+int   shm_open(const char *name, int oflag, mode_t mode);
+int   shm_unlink(const char *name);
 
 #endif

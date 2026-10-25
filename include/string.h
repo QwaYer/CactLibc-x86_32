@@ -45,6 +45,10 @@ char* strdup(const char* s);
 char* strndup(const char* s, size_t n);
 char* stpcpy(char* dest, const char* src);
 
+/* XSI strerror_r: fills buf, returns 0 or ERANGE.  (strerror() itself is
+ * declared in <stdio.h>.) */
+int strerror_r(int errnum, char* buf, size_t buflen);
+
 int  buf_append(char* buf, int pos, int max, const char* s);
 int  buf_append_int(char* buf, int pos, int max, int n);
 
